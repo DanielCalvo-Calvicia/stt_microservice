@@ -1,5 +1,4 @@
 import os
-import logging
 from dataclasses import dataclass
 
 from application.ports.adapter_outbound_port import AdapterOutboundPort
@@ -16,8 +15,9 @@ from application.services.service import STTService
 from infrastructure.inbound.http.fastapi_adapter import FastApiAdapter
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from runtime.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)

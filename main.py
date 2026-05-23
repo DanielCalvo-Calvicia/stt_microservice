@@ -1,18 +1,23 @@
 import asyncio
-import logging
 
 from composition_root.setup.setup import setup
+from runtime.environment import apply_launch_environment
+from runtime.logger import configure_application_logging, get_logger
 
-logger = logging.getLogger(__name__)
+runtime_environment = apply_launch_environment()
+configure_application_logging(runtime_environment.name)
+logger = get_logger(__name__)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
     try:
-        logger.info("Starting STT microservice entry point.")
+        logger.info(
+            "Starting STT microservice entry point: environment=%s source=%s launch_profile=%s env_file=%s.",
+            runtime_environment.name,
+            runtime_environment.source,
+            runtime_environment.launch_profile,
+            runtime_environment.env_file,
+        )
         asyncio.run(setup())
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received. Exiting.")

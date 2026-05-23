@@ -1,5 +1,3 @@
-import logging
-
 from application.dtos.services_dtos import (
     ProcessStreamResponseDto as ServiceStreamResponse,
     ProcessBatchResponseDto as ServiceBatchResponse,
@@ -10,8 +8,9 @@ from application.dtos.adapter_inbound_dtos import (
     ProcessBatchResponseDto as InboundBatchResponse,
     STTAvailabilityResponseDto as InboundAvailabilityResponse,
 )
+from runtime.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def map_service_to_inbound_stream_response(

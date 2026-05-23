@@ -304,9 +304,9 @@ Important project-owned files and folders:
 ### Startup sequence
 
 1. `main.py` imports `setup` from `composition_root.setup.setup`.
-2. `asyncio.run(setup())` starts the async runtime.
-3. `setup()` searches for `.env` using `find_dotenv('.env')`.
-4. If found, `.env` is loaded using `load_dotenv`.
+2. `main.py` resolves the active runtime environment from `.vscode/launch.json`, launch `env`, launch `envFile`, and the current process environment.
+3. `main.py` configures the centralized project logger for the resolved environment.
+4. `asyncio.run(setup())` starts the async runtime.
 5. `SERVICE_HOST` is read with default `127.0.0.1`.
 6. `SERVICE_PORT` is read with default `8001` and cast to `int`.
 7. `BuildContainer(name="STT Microservice")` is called.
@@ -807,7 +807,8 @@ No application-level cache exists.
 
 | Variable | Required | Default | Purpose | Example |
 | --- | --- | --- | --- | --- |
-| `APP_ENV` | No | None in code | Used only by `.env` and VS Code launch config. The application does not read it directly. | `debug` |
+| `APP_ENV` | No | `development` | Primary runtime environment variable. Valid values are `development`, `staging`, and `production`. | `development` |
+| `VSCODE_ENV` | No | `development` | Secondary runtime environment variable if `APP_ENV` is not set. Valid values are `development`, `staging`, and `production`. | `staging` |
 | `SERVICE_HOST` | No | `127.0.0.1` | Host/IP passed to Uvicorn. | `127.0.0.1` |
 | `SERVICE_PORT` | No | `8001` | TCP port passed to Uvicorn. Must parse as integer. | `8001` |
 | `STT_ENGINE` | No | `openai` | Selects outbound adapter. Exactly `openai` uses OpenAI. Any other value uses local faster-whisper. | `openai` or `local` |
@@ -818,10 +819,45 @@ No application-level cache exists.
 
 | File | Purpose |
 | --- | --- |
-| `.env` | Local environment loaded by `find_dotenv('.env')` and `load_dotenv`. Contains service host/port, engine choice, OpenAI key, autoload URL. |
-| `.vscode/launch.json` | VS Code debug/run configs. Debug uses `.env`; production config references `.env.production`. |
+| `.env` | Development env file referenced by the VS Code development launch profile. Contains service host/port, engine choice, OpenAI key, autoload URL. |
+| `.vscode/launch.json` | Source of truth for launch profiles, runtime environment names, and profile-specific `envFile` values. |
 | `.vscode/settings.json` | Points VS Code to `windows/Scripts/python.exe`. |
 | `requirements.windows.txt` | pip requirements for Windows environment. |
+
+### Runtime environment resolution
+
+The real runtime entry point is `main.py`. It resolves the environment before calling `composition_root.setup.setup()`, and the service then starts FastAPI through Uvicorn.
+
+Launch profile mapping:
+
+| VS Code launch profile | Environment | envFile |
+| --- | --- | --- |
+| `Python: Debug (development env)` | `development` | `.env` |
+| `Python: Run (staging env)` | `staging` | `.env.staging` |
+| `Python: Run (production env)` | `production` | `.env.production` |
+
+Environment precedence:
+
+1. Existing process environment: `APP_ENV`, then `VSCODE_ENV`.
+2. Active VS Code launch profile `env`: `APP_ENV`, then `VSCODE_ENV`.
+3. Active VS Code launch profile `envFile`: `APP_ENV`, then `VSCODE_ENV`.
+4. Safe fallback: `development`.
+
+Only `development`, `staging`, and `production` are valid runtime environments. Invalid or missing values fall back to `development`; the legacy value `debug` is treated as `development` for backward compatibility.
+
+### Logging
+
+Project code uses the centralized logger in `runtime/logger.py`. Every application log line includes timestamp, environment, log level, and module/scope name.
+
+| Environment | Project logger output |
+| --- | --- |
+| `development` | `trace`, `info`, `warn`, `error`, `critical` |
+| `staging` | `warn`, `error`, `critical` |
+| `production` | `critical` only |
+
+FastAPI and Uvicorn logs are not filtered by the project logger. Request logs, startup logs, shutdown logs, and server errors remain visible in `development`, `staging`, and `production`.
+
+To add a new launch profile, add a configuration in `.vscode/launch.json`, set `env.APP_ENV` to one of the supported environments, and point `envFile` at that profile's env file. Adding a new environment later requires updating `SUPPORTED_ENVIRONMENTS` and `_LOG_LEVELS_BY_ENVIRONMENT` in `runtime`.
 
 ### Secrets required
 
@@ -876,15 +912,11 @@ pip install -r requirements.windows.txt
 python main.py
 ```
 
-Expected startup output includes:
+Expected project startup output in development includes structured application logs similar to:
 
 ```text
-============================================================
- STT Microservice - Starting Server
-============================================================
-Host: 127.0.0.1
-Port: 8001
-Application started. Waiting for shutdown signal (Ctrl+C)...
+2026-05-23 16:00:00,000 development INFO [__main__] Starting STT microservice entry point: environment=development ...
+2026-05-23 16:00:00,000 development INFO [composition_root.setup.setup] STT Microservice server starting on 127.0.0.1:8001.
 ```
 
 ### How to test
@@ -1250,4 +1282,3 @@ Higher risk:
 - Local STT language is English.
 - Local STT runs on CPU with int8 compute.
 - Autoload stream source accepts POST with `{}` or GET after 405.
-

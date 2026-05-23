@@ -1,4 +1,3 @@
-import logging
 import time
 from typing import AsyncIterator, Any
 
@@ -31,9 +30,10 @@ from application.dtos.mapper.service_to_adapter_inbound import (
     map_service_to_inbound_batch_response,
     map_service_to_inbound_availability_response,
 )
+from runtime.logger import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class FastApiAdapter(AdapterInboundPort):

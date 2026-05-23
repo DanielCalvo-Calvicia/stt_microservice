@@ -1,7 +1,6 @@
-import logging
-
 from application.ports.service_port import ServicePort
 from application.ports.adapter_outbound_port import AdapterOutboundPort
+from runtime.logger import get_logger
 
 from application.dtos.services_dtos import (
     ProcessStreamRequestDto as ServiceStreamRequest,
@@ -23,7 +22,7 @@ from application.dtos.mapper.adapter_outbound_to_service import (
     map_outbound_to_service_availability_response,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class STTService(ServicePort):
