@@ -20,6 +20,7 @@ The service supports:
 - Health checking through `GET /health`.
 - STT engine availability checking through `GET /available`.
 - Streaming audio transcription through `POST /process/stream`, returning Server-Sent Events (SSE).
+- Decoupled single shared stream flow through `POST /process/stream/set` and `GET /process/stream/get`.
 - Batch audio transcription through `POST /process/batch`, returning JSON.
 - Optional background autoloading from an external audio stream URL configured by `AUTOLOAD_VOICE_STREAM_URL`.
 
@@ -31,6 +32,7 @@ The service supports:
 - Segment streaming audio by volume/silence thresholds.
 - Transcribe utterances using either OpenAI Whisper or a local faster-whisper model.
 - Return transcription results through HTTP JSON or SSE.
+- Maintain one process-local decoupled stream queue for separated inbound audio upload and outbound text retrieval.
 - Optionally consume an external voice stream in the background and print transcriptions to stdout.
 
 ### Core business logic
@@ -100,6 +102,8 @@ flowchart LR
 classDiagram
     class AdapterInboundPort {
         +process_stream(request)
+        +set_stream(request)
+        +get_stream(request)
         +process_batch(request)
         +is_available(request)
         +get_app
@@ -109,6 +113,8 @@ classDiagram
 
     class ServicePort {
         +process_stream(request)
+        +set_stream(request)
+        +get_stream(request)
         +process_batch(request)
         +is_available(request)
     }
@@ -145,7 +151,7 @@ classDiagram
 | `application/ports/*.py` | Abstract contracts for inbound adapter, service, and outbound adapter. |
 | `application/dtos/*.py` | Layer-specific dataclass DTO definitions. |
 | `application/dtos/mapper/*.py` | Pass-through mapping between DTO types in each layer. |
-| `application/services/service.py` | Application orchestration. Converts service DTOs to outbound DTOs and delegates STT work. |
+| `application/services/service.py` | Application orchestration. Converts service DTOs to outbound DTOs, delegates STT work, and owns the shared decoupled stream queue/task. |
 | `infrastructure/inbound/http/fastapi_adapter.py` | Registers HTTP routes and implements inbound adapter methods. |
 | `infrastructure/inbound/http/voice_stream_autoloader.py` | Background task that connects to an external audio stream and sends it through the same inbound stream processing path. |
 | `infrastructure/outbound/openai_stt_adapter.py` | OpenAI Whisper outbound adapter. Converts raw PCM to temporary WAV and calls OpenAI audio transcription. |
@@ -174,6 +180,34 @@ sequenceDiagram
     O-->>S: AsyncIterator[str]
     S-->>I: AsyncIterator[str]
     I-->>C: text/event-stream events: data: <text>
+```
+
+Decoupled stream flow:
+
+```mermaid
+sequenceDiagram
+    participant C1 as Audio Client
+    participant C2 as Text Client
+    participant F as FastAPI Routes
+    participant I as FastApiAdapter
+    participant S as STTService
+    participant O as Outbound STT Adapter
+    participant Q as Shared text queue
+
+    C2->>F: GET /process/stream/get
+    F->>I: GetStreamRequestDto()
+    I->>S: get_stream()
+    S-->>I: AsyncIterator[str] from queue
+    I-->>C2: text/event-stream
+
+    C1->>F: POST /process/stream/set raw PCM bytes
+    F->>I: SetStreamRequestDto(audio_stream, thresholds)
+    I->>S: set_stream()
+    S->>O: process_stream(audio_stream)
+    O-->>S: AsyncIterator[str]
+    S->>Q: put(text)
+    Q-->>C2: data: <text>
+    S->>Q: put(None) completion sentinel
 ```
 
 Batch request flow:
@@ -345,6 +379,8 @@ HTTP routes are registered inside `FastApiAdapter.register_routes()`:
 - `GET /health`
 - `GET /available`
 - `POST /process/stream`
+- `POST /process/stream/set`
+- `GET /process/stream/get`
 - `POST /process/batch`
 
 FastAPI's built-in docs are registered by FastAPI app configuration:
@@ -367,6 +403,15 @@ For every STT request:
 
 The mapping functions currently copy fields directly. They are useful extension points if layer-specific fields diverge in the future.
 
+For the decoupled stream flow:
+
+1. `POST /process/stream/set` creates a new shared text queue in `STTService`.
+2. Any previous shared stream task is cancelled.
+3. The inbound audio request stream is delegated to the selected outbound adapter through the existing `process_stream` path.
+4. Transcription strings are pushed into the shared text queue.
+5. `GET /process/stream/get` returns an SSE response that drains the shared text queue.
+6. A `None` sentinel ends the SSE response when the inbound stream completes or the background forwarding task exits.
+
 ### Shutdown behavior
 
 Shutdown behavior includes:
@@ -375,9 +420,10 @@ Shutdown behavior includes:
 - Uvicorn manages normal ASGI shutdown.
 - FastAPI lifespan calls `adapter_inbound.stop_autoload()` if an autoloader exists.
 - `VoiceStreamAutoloader.stop()` cancels the background task and suppresses `asyncio.CancelledError`.
+- Starting a new decoupled `/process/stream/set` cancels any previous decoupled stream task.
 - `setup()` finally calls `_cleanup(container)`, which currently logs `"Performing graceful shutdown cleanup..."` and has no real cleanup actions.
 
-**Needs verification:** There is no explicit cleanup of local Whisper model resources, OpenAI clients, or pending transcription queues beyond task cancellation.
+**Needs verification:** There is no explicit application-shutdown cleanup of local Whisper model resources, OpenAI clients, or a pending decoupled stream task beyond replacement-time cancellation.
 
 ## Ports & Interfaces
 
@@ -394,6 +440,8 @@ Default inbound service:
   - `GET /available`
   - `POST /process/batch`
   - `POST /process/stream`
+  - `POST /process/stream/set`
+  - `GET /process/stream/get`
   - `GET /docs`
   - `GET /redoc`
   - `GET /openapi.json`
@@ -417,13 +465,15 @@ External STT:
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /health` | Service liveness check | `FastApiAdapter.register_routes.health_check` | None |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /available` | STT engine availability check | `FastApiAdapter.register_routes.handle_check_availability` | `STTService.is_available`, outbound adapter |
 | HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, SSE response | `POST /process/stream` | Stream raw PCM audio and receive incremental transcriptions | `FastApiAdapter.register_routes.handle_process_stream` | `STTService.process_stream`, selected STT adapter |
+| HTTP | `SERVICE_PORT`, default `8001` | HTTP request body stream, JSON response | `POST /process/stream/set` | Feed the process-wide shared decoupled audio stream | `FastApiAdapter.register_routes.handle_set_stream` | `STTService.set_stream`, selected STT adapter, shared text queue |
+| HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, SSE response | `GET /process/stream/get` | Drain the current shared decoupled transcription queue | `FastApiAdapter.register_routes.handle_get_stream` | `STTService.get_stream`, shared text queue |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `POST /process/batch` | Submit complete raw PCM audio buffer and receive full transcription | `FastApiAdapter.register_routes.handle_process_batch` | `STTService.process_batch`, selected STT adapter |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /docs` | Swagger UI | FastAPI built-in | OpenAPI schema |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /redoc` | ReDoc UI | FastAPI built-in | OpenAPI schema |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /openapi.json` | OpenAPI schema | FastAPI built-in | Registered routes |
 | Background worker | N/A | HTTP client stream | `AUTOLOAD_VOICE_STREAM_URL` | Pull external audio stream and print transcriptions | `VoiceStreamAutoloader._worker` | `httpx`, inbound adapter, selected STT adapter |
 
-No GraphQL operations, WebSocket endpoints, MQTT topics, serial ports, gRPC services, message queues, webhooks, file watchers, IPC mechanisms, or internal event buses were found in the project-owned source.
+No GraphQL operations, WebSocket endpoints, MQTT topics, serial ports, gRPC services, external message queues, webhooks, file watchers, IPC mechanisms, or internal event buses were found in the project-owned source. The only internal async coordination primitive is the process-local `asyncio.Queue` used by the decoupled stream flow.
 
 ### `GET /health`
 
@@ -628,6 +678,90 @@ X-Timestamp: <unix timestamp>
 Content-Type: text/event-stream; charset=utf-8
 ```
 
+### `POST /process/stream/set`
+
+| Field | Value |
+| --- | --- |
+| Port | `SERVICE_PORT`, default `8001` |
+| Protocol | HTTP request body stream, JSON response |
+| Path | `/process/stream/set` |
+| Purpose | Feed the single process-wide decoupled audio stream. |
+| Authentication | None implemented. |
+| Request format | Streaming request body of signed 16-bit PCM bytes. Query parameters: `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds`. |
+| Response format | JSON envelope with `data.accepted`. The response is returned after the inbound audio stream completes. |
+| Handler | `FastApiAdapter.register_routes.handle_set_stream`. |
+| Dependencies triggered | `STTService.set_stream`, selected outbound adapter, shared `asyncio.Queue`. |
+| Side effects | Cancels any previous shared stream task, replaces the shared text queue, transcribes incoming audio, and pushes transcription strings into the queue consumed by `/process/stream/get`. |
+| Required environment variables | `STT_ENGINE`; `OPENAI_API_KEY` if OpenAI; `SERVICE_HOST`; `SERVICE_PORT`. |
+| Failure behavior | Exceptions return HTTP 500 JSON with error string. |
+| Timeouts/retry behavior | No explicit retry. The request remains open while the audio upload is being consumed. |
+
+Query parameters are the same as `POST /process/stream`.
+
+Example request:
+
+```bash
+curl -X POST "http://127.0.0.1:8001/process/stream/set?sample_rate=16000&chunk_size=1024&silence_threshold=150&silence_limit_seconds=2.0" \
+  --header "Content-Type: application/octet-stream" \
+  --data-binary "@audio.raw"
+```
+
+Example success response:
+
+```json
+{
+  "action": "set_stream",
+  "status": "success",
+  "status_code": 200,
+  "message": "Stream accepted successfully",
+  "timestamp": 1710000000.0,
+  "data": {
+    "accepted": true
+  }
+}
+```
+
+### `GET /process/stream/get`
+
+| Field | Value |
+| --- | --- |
+| Port | `SERVICE_PORT`, default `8001` |
+| Protocol | HTTP, SSE response (`text/event-stream`) |
+| Path | `/process/stream/get` |
+| Purpose | Drain the current shared decoupled transcription stream. |
+| Authentication | None implemented. |
+| Request format | No body. |
+| Response format | Server-Sent Events. Each yielded transcription is formatted as `data: <text>\n\n`. |
+| Handler | `FastApiAdapter.register_routes.handle_get_stream`. |
+| Dependencies triggered | `STTService.get_stream`, shared `asyncio.Queue`. |
+| Side effects | Consumes items from the process-wide shared text queue. |
+| Required environment variables | `SERVICE_HOST`, `SERVICE_PORT`. |
+| Failure behavior | If no stream has been set, returns HTTP 404 JSON. Unexpected exceptions return HTTP 500 JSON. |
+| Timeouts/retry behavior | No explicit retry. The response remains open until the shared queue receives its completion sentinel. |
+
+Example request:
+
+```bash
+curl -N "http://127.0.0.1:8001/process/stream/get"
+```
+
+Example SSE response:
+
+```text
+data: hello world
+
+data: this is another utterance
+
+```
+
+Operational notes:
+
+- This flow intentionally has no session IDs.
+- There is one shared stream per service process.
+- Starting a new `/process/stream/set` cancels the previous shared stream task and replaces the queue.
+- Multiple simultaneous `/process/stream/get` clients compete for the same queue items; the current implementation is queue-drain, not broadcast.
+- `/process/stream/get` can be opened before or during `/process/stream/set` after the queue exists. Calling it before any `/set` returns HTTP 404.
+
 ### FastAPI documentation endpoints
 
 FastAPI is configured with:
@@ -751,6 +885,10 @@ This project has no persistent domain database model. Its internal data model is
 | `InitOutboundAdapterDto` | `application/dtos/adapter_outbound_dtos.py` | `api_key: str = ""`, `model_name: str = "whisper-1"` | Configures outbound STT adapter. |
 | `ProcessStreamRequestDto` | In inbound, service, outbound DTO modules | `audio_stream`, `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds` | Carries streaming audio and VAD settings. |
 | `ProcessStreamResponseDto` | In inbound, service, outbound DTO modules | `text_stream` | Carries async stream of transcription strings. |
+| `SetStreamRequestDto` | In inbound and service DTO modules | `audio_stream`, `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds` | Carries inbound audio for the shared decoupled stream. |
+| `SetStreamResponseDto` | In inbound and service DTO modules | `accepted: bool` | Confirms the shared decoupled stream upload completed. |
+| `GetStreamRequestDto` | In inbound and service DTO modules | No fields | Request marker for reading the shared decoupled text stream. |
+| `GetStreamResponseDto` | In inbound and service DTO modules | `text_stream` | Carries async text stream drained from the shared decoupled queue. |
 | `ProcessBatchRequestDto` | In inbound, service, outbound DTO modules | `audio_data`, `sample_rate` | Carries full audio buffer. |
 | `ProcessBatchResponseDto` | In inbound, service, outbound DTO modules | `text` | Carries final transcription text. |
 | `STTAvailabilityRequestDto` | In inbound, service, outbound DTO modules | No fields | Availability request marker. |
@@ -769,6 +907,8 @@ The three layers currently duplicate similar DTO classes:
 - Outbound DTOs.
 
 Mappers translate between them by field copying.
+
+The decoupled `SetStream*` and `GetStream*` DTOs exist in the inbound and service layers only. `STTService` reuses the existing outbound `ProcessStream*` DTOs when delegating transcription to the selected STT adapter.
 
 ### Database structure
 
@@ -790,6 +930,8 @@ FastApiAdapter
 
 STTService
   depends on AdapterOutboundPort
+  owns one shared decoupled text queue
+  owns one current decoupled stream task
 
 OpenAISTTAdapter or LocalSTTAdapter
   implements AdapterOutboundPort
@@ -1109,6 +1251,8 @@ Inbound attack surface:
 - `GET /available`
 - `POST /process/batch`
 - `POST /process/stream`
+- `POST /process/stream/set`
+- `GET /process/stream/get`
 - `/docs`
 - `/redoc`
 - `/openapi.json`
@@ -1118,6 +1262,7 @@ Risks:
 - No authentication or rate limiting.
 - Batch endpoint reads entire body into memory with `await request.body()`.
 - Streaming endpoint can keep connections open.
+- Decoupled stream endpoints expose one shared process-wide queue with no authentication or client isolation.
 - Local mode can consume CPU heavily.
 - OpenAI mode can incur external API cost.
 - Error responses expose exception strings.
@@ -1146,6 +1291,7 @@ Reusable with minimal changes:
 - FastAPI route registration pattern.
 - Batch transcription flow.
 - Streaming SSE response shape.
+- Decoupled set/get stream route shape.
 - OpenAI temp WAV conversion utility.
 - Local faster-whisper raw PCM conversion and resampling logic.
 - Autoload worker concept for pulling a remote stream into the same processing path.
@@ -1172,6 +1318,7 @@ Tightly coupled or implicit:
 - English-only transcription is acceptable for local mode.
 - OpenAI Whisper is acceptable for OpenAI mode.
 - Server runs as one process without distributed state.
+- The decoupled stream is intentionally single-instance and process-local.
 
 ### What must be preserved for compatibility
 
@@ -1183,6 +1330,8 @@ To maintain compatibility with current clients:
 - Keep `/process/batch` accepting raw body bytes and `sample_rate` query parameter.
 - Keep `/process/batch` response shape: `data.text`.
 - Keep `/process/stream` accepting raw body stream and returning `text/event-stream`.
+- Keep `/process/stream/set` accepting raw body stream and returning the `data.accepted` JSON field if clients adopt the decoupled flow.
+- Keep `/process/stream/get` returning `text/event-stream` if clients adopt the decoupled flow.
 - Keep SSE event format: `data: <text>\n\n`.
 - Keep query parameter names for stream thresholds.
 - Preserve `STT_ENGINE`, `OPENAI_API_KEY`, `SERVICE_HOST`, `SERVICE_PORT`, and `AUTOLOAD_VOICE_STREAM_URL`.

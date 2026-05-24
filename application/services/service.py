@@ -1,3 +1,6 @@
+import asyncio
+from typing import AsyncIterator, Optional
+
 from application.ports.service_port import ServicePort
 from application.ports.adapter_outbound_port import AdapterOutboundPort
 from runtime.logger import get_logger
@@ -5,6 +8,10 @@ from runtime.logger import get_logger
 from application.dtos.services_dtos import (
     ProcessStreamRequestDto as ServiceStreamRequest,
     ProcessStreamResponseDto as ServiceStreamResponse,
+    SetStreamRequestDto as ServiceSetStreamRequest,
+    SetStreamResponseDto as ServiceSetStreamResponse,
+    GetStreamRequestDto as ServiceGetStreamRequest,
+    GetStreamResponseDto as ServiceGetStreamResponse,
     ProcessBatchRequestDto as ServiceBatchRequest,
     ProcessBatchResponseDto as ServiceBatchResponse,
     STTAvailabilityRequestDto as ServiceAvailabilityRequest,
@@ -29,6 +36,8 @@ class STTService(ServicePort):
     def __init__(self, name: str, outbound_port: AdapterOutboundPort):
         self.name = name
         self.outbound_port = outbound_port
+        self._text_queue: Optional[asyncio.Queue[Optional[str]]] = None
+        self._stream_task: Optional[asyncio.Task] = None
         logger.info("STTService '%s' initialized with outbound adapter %s.", name, type(outbound_port).__name__)
 
     async def process_stream(self, request: ServiceStreamRequest) -> ServiceStreamResponse:
@@ -44,6 +53,86 @@ class STTService(ServicePort):
         outbound_res = await self.outbound_port.process_stream(outbound_req)
         logger.info("STTService '%s' received outbound stream response.", self.name)
         return map_outbound_to_service_stream_response(outbound_res)
+
+    async def set_stream(self, request: ServiceSetStreamRequest) -> ServiceSetStreamResponse:
+        logger.info(
+            "STTService '%s' setting shared stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s.",
+            self.name,
+            request.sample_rate,
+            request.chunk_size,
+            request.silence_threshold,
+            request.silence_limit_seconds,
+        )
+
+        if self._stream_task and not self._stream_task.done():
+            logger.info("STTService '%s' cancelling previous shared stream task.", self.name)
+            self._stream_task.cancel()
+            try:
+                await self._stream_task
+            except asyncio.CancelledError:
+                logger.info("STTService '%s' previous shared stream task cancelled.", self.name)
+
+        self._text_queue = asyncio.Queue()
+        self._stream_task = asyncio.create_task(self._forward_stream_to_queue(request, self._text_queue))
+
+        try:
+            await self._stream_task
+        except asyncio.CancelledError:
+            logger.info("STTService '%s' shared stream set request cancelled.", self.name)
+            raise
+
+        logger.info("STTService '%s' shared stream completed.", self.name)
+        return ServiceSetStreamResponse(accepted=True)
+
+    async def get_stream(self, request: ServiceGetStreamRequest) -> ServiceGetStreamResponse:
+        logger.info("STTService '%s' getting shared text stream.", self.name)
+        if self._text_queue is None:
+            raise RuntimeError("No active stream has been set")
+
+        return ServiceGetStreamResponse(
+            text_stream=self._queue_text_stream(self._text_queue),
+        )
+
+    async def _forward_stream_to_queue(
+        self,
+        request: ServiceSetStreamRequest,
+        queue: asyncio.Queue[Optional[str]],
+    ) -> None:
+        try:
+            outbound_req = map_service_to_outbound_stream_request(request)
+            outbound_res = await self.outbound_port.process_stream(outbound_req)
+            async for text in outbound_res.text_stream:
+                if text:
+                    logger.info("STTService '%s' queued shared transcription: text_length=%s.", self.name, len(text))
+                    await queue.put(text)
+                    logger.info(
+                        "STTService '%s' sent chunked text to shared out stream: text_length=%s text=%r.",
+                        self.name,
+                        len(text),
+                        text,
+                    )
+        except asyncio.CancelledError:
+            logger.info("STTService '%s' shared stream forwarding task cancelled.", self.name)
+            raise
+        except Exception as exc:
+            logger.exception("STTService '%s' shared stream forwarding failed.", self.name)
+            await queue.put(f"[error] {exc}")
+        finally:
+            await queue.put(None)
+
+    async def _queue_text_stream(
+        self,
+        queue: asyncio.Queue[Optional[str]],
+    ) -> AsyncIterator[str]:
+        while True:
+            text = await queue.get()
+            try:
+                if text is None:
+                    logger.info("STTService '%s' shared text stream reached completion sentinel.", self.name)
+                    break
+                yield text
+            finally:
+                queue.task_done()
 
     async def process_batch(self, request: ServiceBatchRequest) -> ServiceBatchResponse:
         logger.info(

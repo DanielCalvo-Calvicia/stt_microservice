@@ -22,6 +22,34 @@ class ProcessStreamResponseDto:
     text_stream: AsyncIterator[str]
 
 
+@dataclass(slots=True, frozen=True)
+class SetStreamRequestDto:
+    """Service-layer request to feed the shared decoupled audio stream."""
+    audio_stream: AsyncIterator[bytes]
+    sample_rate: int = 16000
+    chunk_size: int = 1024
+    silence_threshold: int = 150
+    silence_limit_seconds: float = 2.0
+
+
+@dataclass(slots=True, frozen=True)
+class SetStreamResponseDto:
+    """Service-layer response confirming the shared decoupled stream completed."""
+    accepted: bool
+
+
+@dataclass(slots=True, frozen=True)
+class GetStreamRequestDto:
+    """Service-layer request to read the shared decoupled text stream."""
+    pass
+
+
+@dataclass(slots=True, frozen=True)
+class GetStreamResponseDto:
+    """Service-layer response containing a shared decoupled text stream."""
+    text_stream: AsyncIterator[str]
+
+
 # ──────────────────────────────────────────────
 # BATCH (Non real-time)
 # ──────────────────────────────────────────────
