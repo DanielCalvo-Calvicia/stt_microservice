@@ -1,12 +1,12 @@
 import asyncio
-import logging
 import os
 import uvicorn
-from dotenv import load_dotenv, find_dotenv
 
 from composition_root.containers.container import BuildContainer, Container
+from runtime.environment import apply_launch_environment
+from runtime.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def _cleanup(container: Container):
@@ -15,19 +15,15 @@ async def _cleanup(container: Container):
 
 
 async def setup():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
     logger.info("Starting setup sequence.")
-
-    # Load environment variables
-    dotenv_path = find_dotenv('.env')
-    if dotenv_path:
-        load_dotenv(dotenv_path)
-        logger.info("Loaded environment variables from %s.", dotenv_path)
-    else:
-        logger.warning("No .env file found. Using process environment and defaults.")
+    runtime_environment = apply_launch_environment()
+    logger.info(
+        "Runtime environment loaded: environment=%s source=%s launch_profile=%s env_file=%s.",
+        runtime_environment.name,
+        runtime_environment.source,
+        runtime_environment.launch_profile,
+        runtime_environment.env_file,
+    )
 
     host = os.getenv("SERVICE_HOST", "127.0.0.1")
     port = int(os.getenv("SERVICE_PORT", "8001"))
@@ -53,12 +49,8 @@ async def setup():
     server = uvicorn.Server(config)
     logger.info("Uvicorn server configured with keep-alive timeout of 60 seconds.")
 
-    print("=" * 60)
-    print(" STT Microservice - Starting Server")
-    print("=" * 60)
-    print(f"Host: {host}")
-    print(f"Port: {port}")
-    print("Application started. Waiting for shutdown signal (Ctrl+C)...")
+    logger.info("STT Microservice server starting on %s:%s.", host, port)
+    logger.info("Application started. Waiting for shutdown signal (Ctrl+C).")
 
     try:
         # Run the server (this blocks until stopped)

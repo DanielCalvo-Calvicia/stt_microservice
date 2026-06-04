@@ -7,6 +7,7 @@ class InitOutboundAdapterDto:
     """Configuration for initializing the outbound STT adapter."""
     api_key: str = ""
     model_name: str = "whisper-1"
+    language: str = "en"
 
 
 # ──────────────────────────────────────────────

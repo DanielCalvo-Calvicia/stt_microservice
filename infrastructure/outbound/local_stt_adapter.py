@@ -1,10 +1,10 @@
 import asyncio
-import logging
 import numpy as np
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from faster_whisper import WhisperModel
 
 from application.ports.adapter_outbound_port import AdapterOutboundPort
+from runtime.logger import get_logger
 from application.dtos.adapter_outbound_dtos import (
     InitOutboundAdapterDto,
     ProcessStreamRequestDto,
@@ -15,22 +15,25 @@ from application.dtos.adapter_outbound_dtos import (
     STTAvailabilityResponseDto,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AsyncTextStream(AsyncIterator[str]):
-    def __init__(self, request: ProcessStreamRequestDto, model: WhisperModel):
+    def __init__(self, request: ProcessStreamRequestDto, model: Any, language: str = "en"):
         self.request = request
         self.model = model
+        self.language = language
         logger.info(
-            "Initialized local async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s.",
+            "Initialized local async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s language=%s.",
             request.sample_rate,
             request.chunk_size,
             request.silence_threshold,
             request.silence_limit_seconds,
+            self.language,
         )
         self.audio_buffer = bytearray()
         self.silent_chunks = 0
+        self._pending_pcm_byte = b""
         
         chunks_per_second = self.request.sample_rate / self.request.chunk_size
         self.silence_limit_chunks = int(chunks_per_second * self.request.silence_limit_seconds)
@@ -46,6 +49,7 @@ class AsyncTextStream(AsyncIterator[str]):
         try:
             async for chunk in self.request.audio_stream:
                 logger.debug("Local VAD received audio chunk: bytes=%s.", len(chunk))
+                chunk = self._complete_pcm_chunk(chunk)
                 audio_array = np.frombuffer(chunk, dtype=np.int16)
                 if len(audio_array) > 0:
                     audio_float = audio_array.astype(np.float32)
@@ -60,7 +64,12 @@ class AsyncTextStream(AsyncIterator[str]):
                 else:
                     volume = 0
 
-                print(f"\r[Local] Vol: {volume:5} | Thresh: {self.request.silence_threshold:5} | Silence: {self.silent_chunks:3}", end="")
+                logger.trace(
+                    "Local VAD status: volume=%s threshold=%s silent_chunks=%s.",
+                    volume,
+                    self.request.silence_threshold,
+                    self.silent_chunks,
+                )
 
                 if volume < self.request.silence_threshold:
                     self.silent_chunks += 1
@@ -79,8 +88,32 @@ class AsyncTextStream(AsyncIterator[str]):
                     else:
                         self.silent_chunks = 0
         finally:
+            if self._pending_pcm_byte:
+                logger.warning("Local VAD dropped one trailing incomplete PCM byte.")
+                self._pending_pcm_byte = b""
+            if len(self.audio_buffer) > 0:
+                logger.info(
+                    "Local VAD queued final buffered utterance after audio stream ended: buffered_bytes=%s.",
+                    len(self.audio_buffer),
+                )
+                await self.transcription_queue.put(bytearray(self.audio_buffer))
+                self.audio_buffer.clear()
             logger.info("Local continuous VAD loop completed.")
             await self.transcription_queue.put(None)
+
+    def _complete_pcm_chunk(self, chunk: bytes) -> bytes:
+        if self._pending_pcm_byte:
+            chunk = self._pending_pcm_byte + chunk
+            self._pending_pcm_byte = b""
+        if len(chunk) % 2 == 0:
+            return chunk
+        self._pending_pcm_byte = chunk[-1:]
+        logger.debug(
+            "Local VAD carried incomplete PCM byte to next chunk: input_bytes=%s complete_bytes=%s.",
+            len(chunk),
+            len(chunk) - 1,
+        )
+        return chunk[:-1]
 
     def __aiter__(self):
         return self
@@ -99,10 +132,10 @@ class AsyncTextStream(AsyncIterator[str]):
             target_indices = np.linspace(0, len(audio_data) - 1, target_len)
             audio_data = np.interp(target_indices, original_indices, audio_data).astype(np.float32)
 
-        segments, info = self.model.transcribe(
+        segments, _info = self.model.transcribe(
             audio_data, 
             beam_size=5, 
-            language="en",
+            language=self.language,
             condition_on_previous_text=False,
             no_speech_threshold=0.65
         )
@@ -125,7 +158,7 @@ class AsyncTextStream(AsyncIterator[str]):
                 raise StopAsyncIteration
                 
             logger.info("Local text stream dequeued utterance: bytes=%s.", len(audio_buffer_to_transcribe))
-            print("\n[STT] Processing audio locally...")
+            logger.info("Processing audio locally.")
             
             text_output = await asyncio.to_thread(
                 self._transcribe_sync,
@@ -137,26 +170,25 @@ class AsyncTextStream(AsyncIterator[str]):
 
             if text_output.strip():
                 logger.info("Local text stream returning transcription: text_length=%s.", len(text_output.strip()))
-                print(f"[STT] Result: '{text_output.strip()}'")
+                logger.info("Local transcription result: %s", text_output.strip())
                 return text_output.strip()
             else:
                 logger.info("Local text stream discarded empty transcription.")
-                print("[STT] Result: (Nothing heard)")
 
 
 class LocalSTTAdapter(AdapterOutboundPort):
     def __init__(self, config: InitOutboundAdapterDto):
         model_name = config.model_name or "small.en"
+        self.language = config.language or "en"
         logger.info("Loading local Whisper model '%s' on CPU with int8 compute.", model_name)
-        print(f"Loading local Whisper model '{model_name}'...")
         self.model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=2)
-        logger.info("Local Whisper model '%s' loaded.", model_name)
+        logger.info("Local Whisper model '%s' loaded with language '%s'.", model_name, self.language)
 
     async def process_stream(
         self, request: ProcessStreamRequestDto
     ) -> ProcessStreamResponseDto:
         logger.info("Local STT Adapter processing stream request.")
-        text_stream = AsyncTextStream(request, self.model)
+        text_stream = AsyncTextStream(request, self.model, self.language)
         return ProcessStreamResponseDto(text_stream=text_stream)
 
     async def process_batch(
@@ -176,11 +208,11 @@ class LocalSTTAdapter(AdapterOutboundPort):
             target_indices = np.linspace(0, len(audio_data) - 1, target_len)
             audio_data = np.interp(target_indices, original_indices, audio_data).astype(np.float32)
 
-        segments, info = await asyncio.to_thread(
+        segments, _info = await asyncio.to_thread(
             self.model.transcribe,
             audio_data, 
             beam_size=5, 
-            language="en",
+            language=self.language,
             condition_on_previous_text=False,
             no_speech_threshold=0.65
         )
