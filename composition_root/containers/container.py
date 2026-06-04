@@ -1,12 +1,12 @@
 from dataclasses import dataclass
-import logging
 
 from composition_root.dependencies.stt_dependency import (
     STTDependency,
     generate_stt_dependency,
 )
+from runtime.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)

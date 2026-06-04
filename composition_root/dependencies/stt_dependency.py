@@ -1,5 +1,4 @@
 import os
-import logging
 from dataclasses import dataclass
 
 from application.ports.adapter_outbound_port import AdapterOutboundPort
@@ -16,8 +15,10 @@ from application.services.service import STTService
 from infrastructure.inbound.http.fastapi_adapter import FastApiAdapter
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from runtime.environment import apply_launch_environment
+from runtime.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -28,21 +29,43 @@ class STTDependency:
 
 
 def generate_stt_dependency() -> STTDependency:
+    runtime_environment = apply_launch_environment()
+    logger.info(
+        "Runtime environment loaded for dependency graph: environment=%s source=%s launch_profile=%s env_file=%s.",
+        runtime_environment.name,
+        runtime_environment.source,
+        runtime_environment.launch_profile,
+        runtime_environment.env_file,
+    )
+
     # Read environment to determine which engine to use
     engine = os.getenv("STT_ENGINE", "openai").lower()
-    logger.info("Generating STT dependency graph with engine '%s'.", engine)
+    language = os.getenv("STT_LANGUAGE", "en").strip() or "en"
+    logger.info(
+        "Generating STT dependency graph with engine '%s' and language '%s'.",
+        engine,
+        language,
+    )
     
     if engine == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             logger.error("OPENAI_API_KEY is missing while STT_ENGINE is 'openai'.")
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI STT engine")
-        config = InitOutboundAdapterDto(api_key=api_key, model_name="whisper-1")
+        config = InitOutboundAdapterDto(
+            api_key=api_key,
+            model_name="whisper-1",
+            language=language,
+        )
         logger.info("Creating OpenAI STT outbound adapter.")
         adapter_outbound = OpenAISTTAdapter(config)
     else:
-        config = InitOutboundAdapterDto(model_name="small.en")
-        logger.info("Creating local STT outbound adapter with model '%s'.", config.model_name)
+        config = InitOutboundAdapterDto(model_name="small.en", language=language)
+        logger.info(
+            "Creating local STT outbound adapter with model '%s' and language '%s'.",
+            config.model_name,
+            config.language,
+        )
         adapter_outbound = LocalSTTAdapter(config)
 
     # Wire up the service and inbound adapter

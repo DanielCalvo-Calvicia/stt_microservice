@@ -4,6 +4,10 @@ from typing import Any
 from application.dtos.adapter_inbound_dtos import (
     ProcessStreamRequestDto,
     ProcessStreamResponseDto,
+    SetStreamRequestDto,
+    SetStreamResponseDto,
+    GetStreamRequestDto,
+    GetStreamResponseDto,
     ProcessBatchRequestDto,
     ProcessBatchResponseDto,
     STTAvailabilityRequestDto,
@@ -15,6 +19,16 @@ class AdapterInboundPort(ABC):
     @abstractmethod
     async def process_stream(self, request: ProcessStreamRequestDto) -> ProcessStreamResponseDto:
         """Process a real-time audio stream and return a text stream."""
+        pass
+
+    @abstractmethod
+    async def set_stream(self, request: SetStreamRequestDto) -> SetStreamResponseDto:
+        """Feed the shared decoupled audio stream."""
+        pass
+
+    @abstractmethod
+    async def get_stream(self, request: GetStreamRequestDto) -> GetStreamResponseDto:
+        """Return the shared decoupled transcription stream."""
         pass
 
     @abstractmethod
