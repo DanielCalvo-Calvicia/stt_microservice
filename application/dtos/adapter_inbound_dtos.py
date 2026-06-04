@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
+from application.dtos.audio_stream_items import CompletedAudioSegment
+
 
 # ──────────────────────────────────────────────
 # CONFIGURATION
@@ -18,7 +20,7 @@ class InitInboundAdapterDto:
 @dataclass(slots=True, frozen=True)
 class ProcessStreamRequestDto:
     """Inbound request to process a real-time audio stream."""
-    audio_stream: AsyncIterator[bytes]
+    audio_stream: AsyncIterator[bytes | CompletedAudioSegment]
     sample_rate: int = 16000
     chunk_size: int = 1024
     silence_threshold: int = 150
@@ -34,7 +36,7 @@ class ProcessStreamResponseDto:
 @dataclass(slots=True, frozen=True)
 class SetStreamRequestDto:
     """Inbound request to feed the shared decoupled audio stream."""
-    audio_stream: AsyncIterator[bytes]
+    audio_stream: AsyncIterator[bytes | CompletedAudioSegment]
     sample_rate: int = 16000
     chunk_size: int = 1024
     silence_threshold: int = 150

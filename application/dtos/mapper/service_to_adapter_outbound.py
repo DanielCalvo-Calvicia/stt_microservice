@@ -1,5 +1,6 @@
 from application.dtos.services_dtos import (
     ProcessStreamRequestDto as ServiceStreamRequest,
+    SetStreamRequestDto as ServiceSetStreamRequest,
     ProcessBatchRequestDto as ServiceBatchRequest,
     STTAvailabilityRequestDto as ServiceAvailabilityRequest,
 )
@@ -14,7 +15,7 @@ logger = get_logger(__name__)
 
 
 def map_service_to_outbound_stream_request(
-    request: ServiceStreamRequest,
+    request: ServiceStreamRequest | ServiceSetStreamRequest,
 ) -> OutboundStreamRequest:
     logger.debug(
         "Mapping service stream request to outbound request: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s.",

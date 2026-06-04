@@ -33,18 +33,19 @@ def apply_launch_environment(workspace_root: Path | None = None) -> RuntimeEnvir
     Precedence is:
     1. Existing process environment.
     2. Active launch profile env.
-    3. Active launch profile envFile.
+    3. Active launch profile envFile, or the workspace .env file.
     4. Safe default.
     """
-    root = workspace_root or Path.cwd()
+    root = workspace_root or _default_workspace_root()
     original_process_env = dict(os.environ)
     profiles = _read_launch_profiles(root)
     profile = _select_launch_profile(profiles, original_process_env)
+    env_file = _select_env_file(root, profile)
+    env_file_values = dotenv_values(env_file) if env_file and env_file.exists() else {}
 
-    if profile and profile.env_file and profile.env_file.exists():
-        for key, value in dotenv_values(profile.env_file).items():
-            if value is not None and key not in os.environ:
-                os.environ[key] = value
+    for key, value in env_file_values.items():
+        if value is not None and key not in os.environ:
+            os.environ[key] = value
 
     if profile:
         for key, value in profile.env.items():
@@ -54,9 +55,9 @@ def apply_launch_environment(workspace_root: Path | None = None) -> RuntimeEnvir
     runtime_env = resolve_runtime_environment(
         process_env=original_process_env,
         launch_env=profile.env if profile else {},
-        env_file_values=dotenv_values(profile.env_file) if profile and profile.env_file and profile.env_file.exists() else {},
+        env_file_values=env_file_values,
         launch_profile_name=profile.name if profile else None,
-        env_file=profile.env_file if profile else None,
+        env_file=env_file,
     )
     os.environ["APP_ENV"] = runtime_env.name
     return runtime_env
@@ -143,3 +144,15 @@ def _select_launch_profile(
 
 def _resolve_vscode_path(value: str, workspace_root: Path) -> Path:
     return Path(value.replace("${workspaceFolder}", str(workspace_root))).resolve()
+
+
+def _default_workspace_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _select_env_file(workspace_root: Path, profile: LaunchProfile | None) -> Path | None:
+    if profile and profile.env_file:
+        return profile.env_file
+
+    default_env_file = workspace_root / ".env"
+    return default_env_file if default_env_file.exists() else None

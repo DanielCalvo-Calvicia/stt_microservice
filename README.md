@@ -19,8 +19,8 @@ The service supports:
 
 - Health checking through `GET /health`.
 - STT engine availability checking through `GET /available`.
-- Streaming audio transcription through `POST /process/stream`, returning Server-Sent Events (SSE).
-- Decoupled single shared stream flow through `POST /process/stream/set` and `GET /process/stream/get`.
+- Streaming audio transcription through `POST /process/stream`, returning Server-Sent Events (SSE) with explicit JSON stream events.
+- Decoupled single shared stream flow through `POST /process/stream/set` and `GET /process/stream/get`, using the same JSON stream event contract for output.
 - Batch audio transcription through `POST /process/batch`, returning JSON.
 - Optional background autoloading from an external audio stream URL configured by `AUTOLOAD_VOICE_STREAM_URL`.
 
@@ -31,7 +31,7 @@ The service supports:
 - Delegate STT work through an application service and outbound adapter port.
 - Segment streaming audio by volume/silence thresholds.
 - Transcribe utterances using either OpenAI Whisper or a local faster-whisper model.
-- Return transcription results through HTTP JSON or SSE.
+- Return transcription results through HTTP JSON or explicit event-based SSE streams.
 - Maintain one process-local decoupled stream queue for separated inbound audio upload and outbound text retrieval.
 - Optionally consume an external voice stream in the background and print transcriptions to stdout.
 
@@ -179,7 +179,7 @@ sequenceDiagram
     S->>O: Outbound ProcessStreamRequestDto
     O-->>S: AsyncIterator[str]
     S-->>I: AsyncIterator[str]
-    I-->>C: text/event-stream events: data: <text>
+    I-->>C: text/event-stream events: data: {"type": "...", ...}
 ```
 
 Decoupled stream flow:
@@ -206,7 +206,7 @@ sequenceDiagram
     S->>O: process_stream(audio_stream)
     O-->>S: AsyncIterator[str]
     S->>Q: put(text)
-    Q-->>C2: data: <text>
+    Q-->>C2: data: {"type": "...", ...}
     S->>Q: put(None) completion sentinel
 ```
 
@@ -399,7 +399,7 @@ For every STT request:
 4. `STTService` maps DTO to outbound DTO.
 5. Outbound adapter performs STT.
 6. Response DTOs are mapped back up the stack.
-7. HTTP response is emitted as JSON or SSE.
+7. HTTP response is emitted as JSON or an explicit event-based SSE stream.
 
 The mapping functions currently copy fields directly. They are useful extension points if layer-specific fields diverge in the future.
 
@@ -409,8 +409,9 @@ For the decoupled stream flow:
 2. Any previous shared stream task is cancelled.
 3. The inbound audio request stream is delegated to the selected outbound adapter through the existing `process_stream` path.
 4. Transcription strings are pushed into the shared text queue.
-5. `GET /process/stream/get` returns an SSE response that drains the shared text queue.
-6. A `None` sentinel ends the SSE response when the inbound stream completes or the background forwarding task exits.
+5. `POST /process/stream/set` returns an SSE response using the standard stream event shape; it emits `stream_started` when the upload connection is accepted and `completed` after the upload stream is consumed.
+6. `GET /process/stream/get` returns an SSE response that drains the shared text queue and wraps each logical output as `partial` plus `completed` events.
+7. A `None` sentinel only ends the internal queue drain when the inbound stream completes or the background forwarding task exits. Clients should process each logical output from its `completed` event and should not wait for the HTTP connection to close.
 
 ### Shutdown behavior
 
@@ -464,9 +465,9 @@ External STT:
 | --- | --- | --- | --- | --- | --- | --- |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /health` | Service liveness check | `FastApiAdapter.register_routes.health_check` | None |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /available` | STT engine availability check | `FastApiAdapter.register_routes.handle_check_availability` | `STTService.is_available`, outbound adapter |
-| HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, SSE response | `POST /process/stream` | Stream raw PCM audio and receive incremental transcriptions | `FastApiAdapter.register_routes.handle_process_stream` | `STTService.process_stream`, selected STT adapter |
-| HTTP | `SERVICE_PORT`, default `8001` | HTTP request body stream, JSON response | `POST /process/stream/set` | Feed the process-wide shared decoupled audio stream | `FastApiAdapter.register_routes.handle_set_stream` | `STTService.set_stream`, selected STT adapter, shared text queue |
-| HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, SSE response | `GET /process/stream/get` | Drain the current shared decoupled transcription queue | `FastApiAdapter.register_routes.handle_get_stream` | `STTService.get_stream`, shared text queue |
+| HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, event-based SSE response | `POST /process/stream` | Stream raw PCM audio and receive explicit transcription events | `FastApiAdapter.register_routes.handle_process_stream` | `STTService.process_stream`, selected STT adapter |
+| HTTP | `SERVICE_PORT`, default `8001` | Long-lived HTTP request body stream, minimal streaming response | `POST /process/stream/set` | Establish and feed the process-wide shared decoupled audio input stream | `FastApiAdapter.register_routes.handle_set_stream` | `STTService.set_stream`, selected STT adapter, shared text queue |
+| HTTP/SSE | `SERVICE_PORT`, default `8001` | HTTP, event-based SSE response | `GET /process/stream/get` | Drain the current shared decoupled transcription queue as explicit transcription events | `FastApiAdapter.register_routes.handle_get_stream` | `STTService.get_stream`, shared text queue |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `POST /process/batch` | Submit complete raw PCM audio buffer and receive full transcription | `FastApiAdapter.register_routes.handle_process_batch` | `STTService.process_batch`, selected STT adapter |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /docs` | Swagger UI | FastAPI built-in | OpenAPI schema |
 | HTTP | `SERVICE_PORT`, default `8001` | HTTP | `GET /redoc` | ReDoc UI | FastAPI built-in | OpenAPI schema |
@@ -632,12 +633,12 @@ Example failure response:
 | Purpose | Process a streamed raw PCM audio request and yield transcription events. |
 | Authentication | None implemented. |
 | Request format | Streaming request body of signed 16-bit PCM bytes. Query parameters: `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds`. |
-| Response format | Server-Sent Events. Each yielded transcription is formatted as `data: <text>\n\n`. |
+| Response format | Server-Sent Events. Each event uses `data: <json>\n\n`, where the JSON object follows the stream event schema below. |
 | Handler | `FastApiAdapter.register_routes.handle_process_stream`. |
 | Dependencies triggered | `STTService.process_stream`, selected outbound adapter, OpenAI API or local faster-whisper model. |
 | Side effects | Transcription logs and volume debug output printed to stdout. OpenAI engine creates temporary WAV files per utterance. Local engine creates an internal VAD task and transcription queue. |
 | Required environment variables | `STT_ENGINE`; `OPENAI_API_KEY` if OpenAI; `SERVICE_HOST`; `SERVICE_PORT`. |
-| Failure behavior | Exceptions before `StreamingResponse` creation return HTTP 500 JSON. Exceptions during streaming may terminate the stream; behavior is framework/client dependent. |
+| Failure behavior | Exceptions before `StreamingResponse` creation return HTTP 500 JSON. Exceptions during streaming emit an `error` event when the response stream can still write. |
 | Timeouts/retry behavior | No explicit retry. Uvicorn keep-alive timeout is 60 seconds. OpenAI SDK default timeout behavior applies unless overridden by SDK defaults. |
 
 Query parameters:
@@ -648,6 +649,40 @@ Query parameters:
 | `chunk_size` | `int` | `1024` | Used to calculate chunks per second for silence duration. It does not force HTTP chunk sizes. |
 | `silence_threshold` | `int` | `150` | Volume threshold for silence/speech detection. |
 | `silence_limit_seconds` | `float` | `2.0` | Required silence duration before an utterance is considered complete. |
+
+Stream event schema:
+
+The service currently uses SSE for stream responses because existing routes and clients use `text/event-stream`. Each SSE `data:` field contains exactly one complete JSON object with the standard stream event shape. The same object can be consumed as newline-delimited JSON if the transport is changed to NDJSON in the future. Raw text chunks, sentinel strings, `[DONE]`, `EOF`, and unstructured stream data are not part of the wire contract.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | `string` | Event type. Allowed values are `stream_started`, `partial`, `completed`, `heartbeat`, and `error`. Unknown event types are protocol errors and should not be produced. |
+| `sequence` | `integer` | Monotonically increasing event number for this stream, starting at `1`. |
+| `timestamp` | `string` | ISO-8601 UTC timestamp, for example `2026-05-24T12:00:00Z`. |
+| `payload` | `object` | Event-specific data. Always present and always an object. |
+
+Event payloads:
+
+| Event type | Payload |
+| --- | --- |
+| `stream_started` | `{}` |
+| `partial` | `{"text":"partial or final text for the current utterance"}` |
+| `partial` for binary/audio data | `{"bytes_base64":"..."}` |
+| `completed` for text | `{"reason":"completed","output":"final text for the current utterance"}` |
+| `completed` for inbound audio streams | `{"reason":"completed","output_bytes_base64":"..."}`; `output_bytes_base64` is optional |
+| `error` | `{"code":"stream_failed","message":"human readable explanation","recoverable":true}` |
+
+Clients must process `completed` immediately and must not wait for the HTTP connection to close. A single stream can emit another `partial` after a `completed` event when a later utterance arrives.
+
+Client behavior:
+
+- Read and parse one SSE `data:` JSON object at a time.
+- Validate that `type`, `sequence`, `timestamp`, and `payload` are present.
+- Buffer `partial.payload.text` when needed for display or accumulation.
+- Act on `completed` as the end of the current logical utterance, even if the stream remains open.
+- Treat unknown event types as protocol errors.
+- Treat missing required fields as protocol errors.
+- Log `error` events and stop or retry according to `payload.recoverable`.
 
 Example request:
 
@@ -660,9 +695,15 @@ curl -N -X POST "http://127.0.0.1:8001/process/stream?sample_rate=16000&chunk_si
 Example SSE response:
 
 ```text
-data: hello world
+data: {"type":"stream_started","sequence":1,"timestamp":"2026-05-24T12:00:00Z","payload":{}}
 
-data: this is another utterance
+data: {"type":"partial","sequence":2,"timestamp":"2026-05-24T12:00:01Z","payload":{"text":"hello world"}}
+
+data: {"type":"completed","sequence":3,"timestamp":"2026-05-24T12:00:02Z","payload":{"reason":"completed","output":"hello world"}}
+
+data: {"type":"partial","sequence":4,"timestamp":"2026-05-24T12:00:05Z","payload":{"text":"this is another utterance"}}
+
+data: {"type":"completed","sequence":5,"timestamp":"2026-05-24T12:00:06Z","payload":{"reason":"completed","output":"this is another utterance"}}
 
 ```
 
@@ -683,17 +724,17 @@ Content-Type: text/event-stream; charset=utf-8
 | Field | Value |
 | --- | --- |
 | Port | `SERVICE_PORT`, default `8001` |
-| Protocol | HTTP request body stream, JSON response |
+| Protocol | Long-lived HTTP request body stream, SSE response (`text/event-stream`) by default; NDJSON response (`application/x-ndjson`) when requested with `Accept: application/x-ndjson`. |
 | Path | `/process/stream/set` |
-| Purpose | Feed the single process-wide decoupled audio stream. |
+| Purpose | Establish and feed the single process-wide decoupled audio input stream. |
 | Authentication | None implemented. |
-| Request format | Streaming request body of signed 16-bit PCM bytes. Query parameters: `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds`. |
-| Response format | JSON envelope with `data.accepted`. The response is returned after the inbound audio stream completes. |
+| Request format | Preferred: `application/x-ndjson`, one standard stream event JSON object per line. `partial.payload.bytes_base64` carries base64-encoded signed 16-bit PCM chunks. `completed.payload.output_bytes_base64`, when present, carries base64-encoded signed 16-bit PCM bytes for the final event and then marks the end of the input event stream. Backward-compatible fallback: raw signed 16-bit PCM bytes with `application/octet-stream`. Query parameters: `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds`. |
+| Response format | Server-Sent Events by default. Each event uses `data: <json>\n\n`, with the same standard stream event schema as `POST /process/stream`. If `Accept: application/x-ndjson` is sent, each response event is emitted as one JSON object per line. The route emits `stream_started` when the input connection is established and `completed` with `{"reason":"completed","output":"accepted"}` after the audio request stream is consumed. Parsed text is not returned by this endpoint; it is returned by `GET /process/stream/get`. |
 | Handler | `FastApiAdapter.register_routes.handle_set_stream`. |
 | Dependencies triggered | `STTService.set_stream`, selected outbound adapter, shared `asyncio.Queue`. |
 | Side effects | Cancels any previous shared stream task, replaces the shared text queue, transcribes incoming audio, and pushes transcription strings into the queue consumed by `/process/stream/get`. |
 | Required environment variables | `STT_ENGINE`; `OPENAI_API_KEY` if OpenAI; `SERVICE_HOST`; `SERVICE_PORT`. |
-| Failure behavior | Exceptions return HTTP 500 JSON with error string. |
+| Failure behavior | Exceptions before the streaming response starts return HTTP 500 JSON. Exceptions after `200 OK` has been sent are emitted as standard `error` events when possible; parsed output errors are surfaced through `/process/stream/get` when possible. |
 | Timeouts/retry behavior | No explicit retry. The request remains open while the audio upload is being consumed. |
 
 Query parameters are the same as `POST /process/stream`.
@@ -702,23 +743,46 @@ Example request:
 
 ```bash
 curl -X POST "http://127.0.0.1:8001/process/stream/set?sample_rate=16000&chunk_size=1024&silence_threshold=150&silence_limit_seconds=2.0" \
+  --header "Content-Type: application/x-ndjson" \
+  --data-binary "@audio-events.ndjson"
+```
+
+Example NDJSON request body:
+
+```jsonl
+{"type":"stream_started","sequence":1,"timestamp":"2026-05-24T12:00:00Z","payload":{}}
+{"type":"partial","sequence":2,"timestamp":"2026-05-24T12:00:01Z","payload":{"bytes_base64":"<base64-encoded raw PCM audio chunk>"}}
+{"type":"heartbeat","sequence":3,"timestamp":"2026-05-24T12:00:02Z","payload":{}}
+{"type":"completed","sequence":4,"timestamp":"2026-05-24T12:00:03Z","payload":{"reason":"completed","output_bytes_base64":"<base64-encoded final raw PCM audio, optional>"}}
+```
+
+Raw PCM fallback request:
+
+```bash
+curl -X POST "http://127.0.0.1:8001/process/stream/set?sample_rate=16000&chunk_size=1024&silence_threshold=150&silence_limit_seconds=2.0" \
   --header "Content-Type: application/octet-stream" \
   --data-binary "@audio.raw"
 ```
 
-Example success response:
+Example SSE response:
 
-```json
-{
-  "action": "set_stream",
-  "status": "success",
-  "status_code": 200,
-  "message": "Stream accepted successfully",
-  "timestamp": 1710000000.0,
-  "data": {
-    "accepted": true
-  }
-}
+```text
+data: {"type":"stream_started","sequence":1,"timestamp":"2026-05-24T12:00:00Z","payload":{}}
+
+data: {"type":"completed","sequence":2,"timestamp":"2026-05-24T12:00:02Z","payload":{"reason":"completed","output":"accepted"}}
+
+```
+
+Example response headers:
+
+```text
+HTTP/1.1 200 OK
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: keep-alive
+X-Action: set_stream
+X-Status: accepted
+X-Message: Input stream connection established
 ```
 
 ### `GET /process/stream/get`
@@ -726,18 +790,18 @@ Example success response:
 | Field | Value |
 | --- | --- |
 | Port | `SERVICE_PORT`, default `8001` |
-| Protocol | HTTP, SSE response (`text/event-stream`) |
+| Protocol | HTTP, SSE response (`text/event-stream`) by default; NDJSON response (`application/x-ndjson`) when requested with `Accept: application/x-ndjson`. |
 | Path | `/process/stream/get` |
 | Purpose | Drain the current shared decoupled transcription stream. |
 | Authentication | None implemented. |
 | Request format | No body. |
-| Response format | Server-Sent Events. Each yielded transcription is formatted as `data: <text>\n\n`. |
+| Response format | Server-Sent Events by default. Each event uses `data: <json>\n\n`, with the same stream event schema as `POST /process/stream`. If `Accept: application/x-ndjson` is sent, each event is emitted as one JSON object per line. |
 | Handler | `FastApiAdapter.register_routes.handle_get_stream`. |
 | Dependencies triggered | `STTService.get_stream`, shared `asyncio.Queue`. |
 | Side effects | Consumes items from the process-wide shared text queue. |
 | Required environment variables | `SERVICE_HOST`, `SERVICE_PORT`. |
 | Failure behavior | If no stream has been set, returns HTTP 404 JSON. Unexpected exceptions return HTTP 500 JSON. |
-| Timeouts/retry behavior | No explicit retry. The response remains open until the shared queue receives its completion sentinel. |
+| Timeouts/retry behavior | No explicit retry. The response can remain open after a logical output completes; clients should act on `completed` events rather than waiting for connection close. |
 
 Example request:
 
@@ -745,12 +809,21 @@ Example request:
 curl -N "http://127.0.0.1:8001/process/stream/get"
 ```
 
+Example NDJSON request:
+
+```bash
+curl -N "http://127.0.0.1:8001/process/stream/get" \
+  --header "Accept: application/x-ndjson"
+```
+
 Example SSE response:
 
 ```text
-data: hello world
+data: {"type":"stream_started","sequence":1,"timestamp":"2026-05-24T12:00:00Z","payload":{}}
 
-data: this is another utterance
+data: {"type":"partial","sequence":2,"timestamp":"2026-05-24T12:00:01Z","payload":{"text":"hello world"}}
+
+data: {"type":"completed","sequence":3,"timestamp":"2026-05-24T12:00:02Z","payload":{"reason":"completed","output":"hello world"}}
 
 ```
 
@@ -1063,18 +1136,31 @@ Expected project startup output in development includes structured application l
 
 ### How to test
 
-Start the server first, then run:
+Run the automated unit and contract tests:
+
+```powershell
+.\windows\Scripts\python.exe -m pytest -q
+```
+
+These tests currently cover:
+
+- Runtime environment and `.env` / VS Code launch-profile resolution.
+- SSE stream event shape, sequencing, empty-output behavior, and error events.
+- Decoupled `/process/stream/set` and `/process/stream/get` queue behavior through in-process ASGI tests.
+- Final buffered utterance flushing for both local and OpenAI streaming adapters when the audio input ends.
+
+For a manual smoke test against a running server, start the service first, then run:
 
 ```powershell
 .\windows\Scripts\python.exe tests\simple.py
 ```
 
-The test script currently checks:
+The manual smoke script currently checks:
 
 - `GET /health`
 - `GET /available`
 
-It does not test `/process/batch` or `/process/stream`.
+It does not exercise real transcription quality or full external OpenAI/local-model behavior.
 
 ### How to build
 
@@ -1177,7 +1263,7 @@ None of this state persists across process restarts.
 | Startup | Local model cannot load | Exception propagates; service does not start. |
 | `/process/batch` | Empty request body | Intended `HTTPException(400)`, but broad catch returns HTTP 500. |
 | `/process/batch` | Invalid/non-PCM audio | Likely adapter exception or poor transcription; returns HTTP 500 if exception occurs. |
-| `/process/stream` | Stream ends before silence completes | Iterator may stop without yielding buffered final audio depending on adapter behavior. Needs verification for final partial utterance handling. |
+| `/process/stream` | Stream ends before silence completes | Local and OpenAI streaming adapters flush buffered final audio when input ends; this is covered by `tests/test_adapter_final_flush.py`. |
 | OpenAI | Invalid API key/rate limit/network error | Exception becomes HTTP 500 from route handlers. |
 | OpenAI | Temp file cleanup failure | Suppressed. |
 | Local | Model inference error | Exception becomes HTTP 500 or stream termination. |
@@ -1330,9 +1416,9 @@ To maintain compatibility with current clients:
 - Keep `/process/batch` accepting raw body bytes and `sample_rate` query parameter.
 - Keep `/process/batch` response shape: `data.text`.
 - Keep `/process/stream` accepting raw body stream and returning `text/event-stream`.
-- Keep `/process/stream/set` accepting raw body stream and returning the `data.accepted` JSON field if clients adopt the decoupled flow.
+- Keep `/process/stream/set` accepting a raw long-lived body stream and returning `200 OK` when the input connection is established.
 - Keep `/process/stream/get` returning `text/event-stream` if clients adopt the decoupled flow.
-- Keep SSE event format: `data: <text>\n\n`.
+- Keep SSE event format: `data: <json>\n\n`, using the explicit stream event schema.
 - Keep query parameter names for stream thresholds.
 - Preserve `STT_ENGINE`, `OPENAI_API_KEY`, `SERVICE_HOST`, `SERVICE_PORT`, and `AUTOLOAD_VOICE_STREAM_URL`.
 
@@ -1391,8 +1477,7 @@ Higher risk:
 
 ### Ambiguous behavior
 
-- Final partial utterance handling in streaming mode needs verification. If the stream ends before silence threshold is reached, buffered audio may not be transcribed.
-- Exact audio format expected by clients is not documented in code comments or tests beyond int16 PCM implementation.
+- Exact audio format expected by clients is not documented in code comments or tests beyond signed 16-bit PCM implementation.
 - Local model download/cache behavior is not controlled by the app.
 - Production environment is unclear. `.env.production` is referenced by VS Code but not present.
 - Compatibility with Python 3.14 and all ML dependencies needs verification.
@@ -1415,7 +1500,7 @@ Higher risk:
 - Batch endpoint reads complete request body into memory.
 - Broad exception handlers return HTTP 500 for all errors.
 - Error responses include exception strings.
-- No tests for actual transcription endpoints.
+- No end-to-end tests with real OpenAI or faster-whisper transcription backends.
 - No lock file or pinned exact dependency versions.
 - Local mode can trigger heavy CPU work on request.
 - OpenAI mode can trigger external API cost on request.

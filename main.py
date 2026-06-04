@@ -1,4 +1,12 @@
 import asyncio
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env BEFORE any project code that reads os.getenv().
+# VS Code debugpy with integratedTerminal does not always inject envFile
+# variables, so this explicit call guarantees the file is loaded.
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 from composition_root.setup.setup import setup
 from runtime.environment import apply_launch_environment

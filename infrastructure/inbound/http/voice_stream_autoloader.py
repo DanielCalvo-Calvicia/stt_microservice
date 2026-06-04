@@ -2,6 +2,7 @@ import asyncio
 import httpx
 from typing import AsyncIterator
 
+from application.ports.adapter_inbound_port import AdapterInboundPort
 from application.dtos.adapter_inbound_dtos import ProcessStreamRequestDto
 from runtime.logger import get_logger
 
@@ -9,20 +10,20 @@ logger = get_logger(__name__)
 
 
 class VoiceStreamAutoloader:
-    def __init__(self, stream_url: str, inbound_adapter):
+    def __init__(self, stream_url: str, inbound_adapter: AdapterInboundPort) -> None:
         self.stream_url = stream_url
         self.inbound_adapter = inbound_adapter
-        self._task = None
+        self._task: asyncio.Task[None] | None = None
         logger.info("VoiceStreamAutoloader initialized for stream URL %s.", stream_url)
 
-    def start(self):
+    def start(self) -> None:
         if self._task is None or self._task.done():
             logger.info("Creating VoiceStreamAutoloader worker task.")
             self._task = asyncio.create_task(self._worker())
         else:
             logger.info("VoiceStreamAutoloader worker task is already running.")
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self._task and not self._task.done():
             logger.info("Cancelling VoiceStreamAutoloader worker task.")
             self._task.cancel()
@@ -35,7 +36,7 @@ class VoiceStreamAutoloader:
         else:
             logger.info("VoiceStreamAutoloader stop requested with no active task.")
 
-    async def _worker(self):
+    async def _worker(self) -> None:
         method = "POST"
         logger.info("VoiceStreamAutoloader worker loop started.")
         while True:
@@ -43,8 +44,12 @@ class VoiceStreamAutoloader:
                 logger.info("Connecting to voice stream at %s via %s.", self.stream_url, method)
                 # We use timeout=None to allow an infinitely long stream
                 async with httpx.AsyncClient(timeout=None) as client:
-                    kwargs = {"json": {}} if method == "POST" else {}
-                    async with client.stream(method, self.stream_url, **kwargs) as response:
+                    stream_context = (
+                        client.stream(method, self.stream_url, json={})
+                        if method == "POST"
+                        else client.stream(method, self.stream_url)
+                    )
+                    async with stream_context as response:
                         if response.status_code == 405 and method == "POST":
                             logger.warning("Voice stream rejected POST with 405. Falling back to GET.")
                             method = "GET"
@@ -79,6 +84,6 @@ class VoiceStreamAutoloader:
             except asyncio.CancelledError:
                 logger.info("VoiceStreamAutoloader worker loop cancelled.")
                 break
-            except Exception as e:
+            except Exception:
                 logger.exception("Unexpected VoiceStreamAutoloader error. Reconnecting in 5 seconds.")
                 await asyncio.sleep(5)

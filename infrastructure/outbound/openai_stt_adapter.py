@@ -31,15 +31,17 @@ _WHISPER_MODEL = "whisper-1"
 
 
 class _AsyncOpenAITextStream(AsyncIterator[str]):
-    def __init__(self, request: ProcessStreamRequestDto, api_key: str):
+    def __init__(self, request: ProcessStreamRequestDto, api_key: str, language: str = "en"):
         self.request = request
         self.client = OpenAI(api_key=api_key)
+        self.language = language
         logger.info(
-            "Initialized OpenAI async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s.",
+            "Initialized OpenAI async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s language=%s.",
             request.sample_rate,
             request.chunk_size,
             request.silence_threshold,
             request.silence_limit_seconds,
+            self.language,
         )
 
         self.audio_buffer = bytearray()
@@ -120,12 +122,15 @@ class _AsyncOpenAITextStream(AsyncIterator[str]):
                         "OpenAI audio stream ended with one incomplete PCM byte; dropping trailing byte before final buffer handling."
                     )
                     self._pending_pcm_byte = b""
-                logger.warning(
-                    "OpenAI audio stream ended with an unfinished utterance buffered; it will not be transcribed because silence completion was not reached: buffered_bytes=%s silent_chunks=%s silence_limit_chunks=%s.",
+                logger.info(
+                    "OpenAI audio stream ended with an unfinished utterance buffered; transcribing final buffered audio: buffered_bytes=%s silent_chunks=%s silence_limit_chunks=%s.",
                     len(self.audio_buffer),
                     self.silent_chunks,
                     self.silence_limit_chunks,
                 )
+                text = await self._transcribe_utterance()
+                if text:
+                    return text
             raise StopAsyncIteration
 
     def _complete_pcm_chunk(self, chunk: bytes) -> bytes:
@@ -239,25 +244,30 @@ class _AsyncOpenAITextStream(AsyncIterator[str]):
     def _write_wav_file(raw_pcm: bytes, sample_rate: int) -> str:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
             wav_path = wav_file.name
-            with wave.open(wav_file, "wb") as wf:
-                wf.setnchannels(_WAV_CHANNELS)
-                wf.setsampwidth(_WAV_SAMPLE_WIDTH)
-                wf.setframerate(sample_rate)
-                wf.writeframes(raw_pcm)
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(_WAV_CHANNELS)
+            wf.setsampwidth(_WAV_SAMPLE_WIDTH)
+            wf.setframerate(sample_rate)
+            wf.writeframes(raw_pcm)
         logger.debug("Temporary WAV file created for OpenAI transcription: %s.", wav_path)
         return wav_path
 
     def _call_whisper_api(self, wav_path: str) -> str:
-        logger.info("Calling OpenAI audio transcription API with model '%s'.", _WHISPER_MODEL)
+        logger.info(
+            "Calling OpenAI audio transcription API with model '%s' and language '%s'.",
+            _WHISPER_MODEL,
+            self.language,
+        )
         with open(wav_path, "rb") as audio_file:
             result = self.client.audio.transcriptions.create(
                 model=_WHISPER_MODEL,
                 file=audio_file,
+                language=self.language,
                 temperature=0.0,
                 response_format="text",
-            )
+        )
         logger.info("OpenAI audio transcription API call completed.")
-        return result.strip() if isinstance(result, str) else result
+        return result.strip() if isinstance(result, str) else str(result)
 
     @staticmethod
     def _cleanup_temp_file(path: str) -> None:
@@ -272,13 +282,18 @@ class _AsyncOpenAITextStream(AsyncIterator[str]):
 class OpenAISTTAdapter(AdapterOutboundPort):
     def __init__(self, config: InitOutboundAdapterDto):
         self.api_key = config.api_key
-        logger.info("OpenAI STT Adapter initialized with configured model name '%s'.", config.model_name)
+        self.language = config.language or "en"
+        logger.info(
+            "OpenAI STT Adapter initialized with configured model name '%s' and language '%s'.",
+            config.model_name,
+            self.language,
+        )
 
     async def process_stream(
         self, request: ProcessStreamRequestDto
     ) -> ProcessStreamResponseDto:
         logger.info("OpenAI STT Adapter processing stream request.")
-        text_stream = _AsyncOpenAITextStream(request, self.api_key)
+        text_stream = _AsyncOpenAITextStream(request, self.api_key, self.language)
         return ProcessStreamResponseDto(text_stream=text_stream)
 
     async def process_batch(
@@ -291,15 +306,20 @@ class OpenAISTTAdapter(AdapterOutboundPort):
         )
         try:
             with open(wav_path, "rb") as audio_file:
-                logger.info("Calling OpenAI audio transcription API for batch request with model '%s'.", _WHISPER_MODEL)
+                logger.info(
+                    "Calling OpenAI audio transcription API for batch request with model '%s' and language '%s'.",
+                    _WHISPER_MODEL,
+                    self.language,
+                )
                 result = await asyncio.to_thread(
                     client.audio.transcriptions.create,
                     model=_WHISPER_MODEL,
                     file=audio_file,
+                    language=self.language,
                     temperature=0.0,
                     response_format="text",
                 )
-            text = result.strip() if isinstance(result, str) else result
+            text = result.strip() if isinstance(result, str) else str(result)
             logger.info("OpenAI batch transcription completed: text_length=%s.", len(text))
             return ProcessBatchResponseDto(text=text)
         finally:

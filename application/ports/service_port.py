@@ -31,6 +31,11 @@ class ServicePort(ABC):
         pass
 
     @abstractmethod
+    async def stop_stream(self) -> None:
+        """Stop the active shared decoupled stream, if any."""
+        pass
+
+    @abstractmethod
     async def process_batch(self, request: ProcessBatchRequestDto) -> ProcessBatchResponseDto:
         """Orchestrate batch audio processing."""
         pass

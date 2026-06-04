@@ -3,6 +3,7 @@ import os
 import uvicorn
 
 from composition_root.containers.container import BuildContainer, Container
+from runtime.environment import apply_launch_environment
 from runtime.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,6 +16,14 @@ async def _cleanup(container: Container):
 
 async def setup():
     logger.info("Starting setup sequence.")
+    runtime_environment = apply_launch_environment()
+    logger.info(
+        "Runtime environment loaded: environment=%s source=%s launch_profile=%s env_file=%s.",
+        runtime_environment.name,
+        runtime_environment.source,
+        runtime_environment.launch_profile,
+        runtime_environment.env_file,
+    )
 
     host = os.getenv("SERVICE_HOST", "127.0.0.1")
     port = int(os.getenv("SERVICE_PORT", "8001"))

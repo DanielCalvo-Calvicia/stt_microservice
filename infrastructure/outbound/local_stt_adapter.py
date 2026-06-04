@@ -1,6 +1,6 @@
 import asyncio
 import numpy as np
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from faster_whisper import WhisperModel
 
 from application.ports.adapter_outbound_port import AdapterOutboundPort
@@ -19,15 +19,17 @@ logger = get_logger(__name__)
 
 
 class AsyncTextStream(AsyncIterator[str]):
-    def __init__(self, request: ProcessStreamRequestDto, model: WhisperModel):
+    def __init__(self, request: ProcessStreamRequestDto, model: Any, language: str = "en"):
         self.request = request
         self.model = model
+        self.language = language
         logger.info(
-            "Initialized local async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s.",
+            "Initialized local async text stream: sample_rate=%s chunk_size=%s silence_threshold=%s silence_limit_seconds=%s language=%s.",
             request.sample_rate,
             request.chunk_size,
             request.silence_threshold,
             request.silence_limit_seconds,
+            self.language,
         )
         self.audio_buffer = bytearray()
         self.silent_chunks = 0
@@ -89,6 +91,13 @@ class AsyncTextStream(AsyncIterator[str]):
             if self._pending_pcm_byte:
                 logger.warning("Local VAD dropped one trailing incomplete PCM byte.")
                 self._pending_pcm_byte = b""
+            if len(self.audio_buffer) > 0:
+                logger.info(
+                    "Local VAD queued final buffered utterance after audio stream ended: buffered_bytes=%s.",
+                    len(self.audio_buffer),
+                )
+                await self.transcription_queue.put(bytearray(self.audio_buffer))
+                self.audio_buffer.clear()
             logger.info("Local continuous VAD loop completed.")
             await self.transcription_queue.put(None)
 
@@ -123,10 +132,10 @@ class AsyncTextStream(AsyncIterator[str]):
             target_indices = np.linspace(0, len(audio_data) - 1, target_len)
             audio_data = np.interp(target_indices, original_indices, audio_data).astype(np.float32)
 
-        segments, info = self.model.transcribe(
+        segments, _info = self.model.transcribe(
             audio_data, 
             beam_size=5, 
-            language="en",
+            language=self.language,
             condition_on_previous_text=False,
             no_speech_threshold=0.65
         )
@@ -170,15 +179,16 @@ class AsyncTextStream(AsyncIterator[str]):
 class LocalSTTAdapter(AdapterOutboundPort):
     def __init__(self, config: InitOutboundAdapterDto):
         model_name = config.model_name or "small.en"
+        self.language = config.language or "en"
         logger.info("Loading local Whisper model '%s' on CPU with int8 compute.", model_name)
         self.model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=2)
-        logger.info("Local Whisper model '%s' loaded.", model_name)
+        logger.info("Local Whisper model '%s' loaded with language '%s'.", model_name, self.language)
 
     async def process_stream(
         self, request: ProcessStreamRequestDto
     ) -> ProcessStreamResponseDto:
         logger.info("Local STT Adapter processing stream request.")
-        text_stream = AsyncTextStream(request, self.model)
+        text_stream = AsyncTextStream(request, self.model, self.language)
         return ProcessStreamResponseDto(text_stream=text_stream)
 
     async def process_batch(
@@ -198,11 +208,11 @@ class LocalSTTAdapter(AdapterOutboundPort):
             target_indices = np.linspace(0, len(audio_data) - 1, target_len)
             audio_data = np.interp(target_indices, original_indices, audio_data).astype(np.float32)
 
-        segments, info = await asyncio.to_thread(
+        segments, _info = await asyncio.to_thread(
             self.model.transcribe,
             audio_data, 
             beam_size=5, 
-            language="en",
+            language=self.language,
             condition_on_previous_text=False,
             no_speech_threshold=0.65
         )
