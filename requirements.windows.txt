@@ -7,3 +7,15 @@ openai>=1.14.0
 faster-whisper>=1.0.1
 httpx>=0.27.0
 pytest>=9.0.0
+
+# Tooling
+ruff
+black
+mypy
+
+# Shared logging + distributed tracing (local checkout; see shared-logging/README.md)
+-e ../shared-logging
+
+# Project contracts (single source of truth for what microservices exchange), bundled in this
+# folder so the service builds on its own. Refresh with contracts/scripts/bundle.py
+./vendor/contracts_microservice-0.6.0-py3-none-any.whl

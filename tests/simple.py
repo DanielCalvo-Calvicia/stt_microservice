@@ -6,9 +6,9 @@ Prerequisites:
       (launch via VS Code or `python main.py`)
 """
 
-import httpx
 import asyncio
-import time
+
+import httpx
 
 BASE_URL = "http://127.0.0.1:8001"
 
@@ -17,10 +17,11 @@ BASE_URL = "http://127.0.0.1:8001"
 # HELPERS
 # ──────────────────────────────────────────────
 
+
 def print_header(title: str) -> None:
-    print(f"\n{'─'*50}")
+    print(f"\n{'─' * 50}")
     print(f"  {title}")
-    print(f"{'─'*50}")
+    print(f"{'─' * 50}")
 
 
 def print_result(label: str, success: bool, detail: str = "") -> None:
@@ -34,6 +35,7 @@ def print_result(label: str, success: bool, detail: str = "") -> None:
 # ──────────────────────────────────────────────
 # TEST STEPS
 # ──────────────────────────────────────────────
+
 
 async def test_health(client: httpx.AsyncClient) -> bool:
     print_header("1. Health Check  →  GET /health")
@@ -53,7 +55,7 @@ async def test_available(client: httpx.AsyncClient) -> bool:
     try:
         resp = await client.get(f"{BASE_URL}/available")
         body = resp.json()
-        ok = resp.status_code == 200 and body.get("data") is True
+        ok = resp.status_code == 200 and (body.get("data") or {}).get("is_available") is True
         print_result("Available", ok, f"status={resp.status_code}  body={body}")
         return ok
     except Exception as e:
@@ -64,6 +66,7 @@ async def test_available(client: httpx.AsyncClient) -> bool:
 # ──────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────
+
 
 async def run_tests() -> None:
     print("\n" + "=" * 50)
