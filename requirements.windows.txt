@@ -18,4 +18,4 @@ mypy
 
 # Project contracts (single source of truth for what microservices exchange), bundled in this
 # folder so the service builds on its own. Refresh with contracts/scripts/bundle.py
-./vendor/contracts_microservice-0.6.0-py3-none-any.whl
+./vendor/contracts_microservice-0.8.0-py3-none-any.whl
