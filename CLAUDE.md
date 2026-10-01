@@ -2,7 +2,7 @@
 
 Port **8001** (`SERVICE_PORT`). Python/FastAPI. Speech to text. Status: working, needs retest after recent changes. See `README.md` and `../CLAUDE.md`.
 
-Current state (2026-10-01): branch `feature_ai_claude_2` (tracks `origin/feature_ai_claude_2`, in sync), working tree clean, last commit `ff93f8e` "Bundle contracts 0.9.0". Tests: `93 passed`. Ruff/mypy are not installed in this venv (the microphone venv's ruff reports 9 findings here, unfixed). Real engines and `tests/simple.py` not run in the last documentation pass.
+Current state (2026-10-01): branch `feature_ai_claude_2` (tracks `origin/feature_ai_claude_2`, in sync), working tree clean, last feature commit `650dad1` "Bundle contracts 0.10.0; refresh docs..." (pushed). Tests: `93 passed`. Ruff/mypy are not installed in this venv (the microphone venv's ruff reports 9 findings here, unfixed). Real engines and `tests/simple.py` not run in the last documentation pass.
 
 ## Role
 
