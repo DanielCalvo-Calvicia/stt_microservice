@@ -5,7 +5,7 @@ HTTP service that turns 16-bit mono PCM audio into text, using the OpenAI Whispe
 ## Run
 
 ```bash
-pip install -r requirements.windows.txt
+pip install -r requirements.windows.txt   # Linux / Raspberry Pi: requirements.linux.txt
 python main.py
 ```
 
