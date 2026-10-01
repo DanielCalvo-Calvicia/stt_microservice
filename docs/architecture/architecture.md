@@ -1,7 +1,7 @@
 # Architecture
 
 STT Microservice follows the same Clean Architecture layout as `microphone_microservice`.
-It supersedes the README in `docs/old/`.
+It supersedes the README in `docs/old/`. Reviewed against the code on 2026-10-01 (branch `feature_ai_claude_2`).
 
 ## Layers and dependency rule
 
@@ -44,7 +44,7 @@ domain/
   operations/pcm.py               PcmChunkAligner: never split a 16-bit sample across chunks
   operations/silence.py           silence_limit_chunks, silence_boundary_chunks
 application/
-  errors.py                       ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured
+  errors.py                       ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured, StreamSettingsMismatch
   dtos/                           ProcessStreamInboundDTO, SetStreamInboundDTO, ProcessBatchInboundDTO,
                                   CompletedAudioSegment, TextStreamOutboundDTO, BatchTranscriptionOutboundDTO
   ports/inbound/stt_transcription_port.py   SttTranscriptionPort (driving)
@@ -77,6 +77,10 @@ tests/  domain/ application/ infrastructure/ composition_root/ architecture/   (
 
 ## Deliberate changes
 
+* **Contract streams (since the 2026-09-20 commit).** Text leaves as `contracts.stream` events (`STT_OUTBOUND`: `stream_started`, a `partial` and a `completed` per utterance, `heartbeat` every 15 s on `/process/stream/get`, `error`); audio can arrive as `STT_INBOUND` NDJSON events; the upload request answers with the `UPLOAD_ACK` stream (`stream_started`, `input_completed` or `error`). SSE is the default framing, NDJSON on `Accept: application/x-ndjson`.
+* **Natural HTTP statuses.** `http_error_mapper.py`: 404 no stream set, 422 invalid settings or settings that differ from the active stream, else 500; empty batch body 400.
+* The autoloader (STT pulling a stream from another service) was removed; its old code is archived in `docs/old/autoloader/`.
+
 * `StreamSettings` rejects a non-positive `sample_rate`/`chunk_size` and negative silence values up front;
   before, `chunk_size=0` failed with a `ZeroDivisionError` deep inside the stream.
 * `POST /process/batch` with an empty body now returns **400**. The old code raised `HTTPException(400)` inside
@@ -85,7 +89,7 @@ tests/  domain/ application/ infrastructure/ composition_root/ architecture/   (
 
 ## Known remaining debt
 
-1. Domain errors are not mapped to 4xx (`InvalidStreamSettings` → 422); see `http_error_mapper.py`, decision D4.
+1. (Resolved) `InvalidStreamSettings` and `StreamSettingsMismatch` now map to 422; unexpected failures stay 500.
 2. The OpenAI engine's start-of-speech threshold is based on the quietest chunk seen so far, so audio that is
    loud from the very first chunk is not detected as speech until a quieter chunk lowers that floor.
 3. The local model (`small.en`) and the OpenAI model (`whisper-1`) are constants, not configuration.
