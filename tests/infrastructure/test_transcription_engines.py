@@ -224,3 +224,24 @@ def test_a_plain_local_stream_yields_text_and_sends_no_prompt():
     text, model = asyncio.run(run())
 
     assert text == "final local text" and "initial_prompt" not in model.kwargs and model.kwargs["beam_size"] == 5
+
+
+def test_openai_batch_sends_the_prompt_only_when_there_is_one(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    class FakeTranscriptions:
+        def create(self, **kwargs: Any) -> str:
+            calls.append(kwargs)
+            return "text"
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.audio = types.SimpleNamespace(transcriptions=FakeTranscriptions())
+
+    monkeypatch.setattr(openai_module, "OpenAI", FakeClient)
+
+    asyncio.run(OpenAIWhisperTranscription("k", "en").transcribe_batch(_pcm_chunk(5), 16000))
+    asyncio.run(OpenAIWhisperTranscription("k", "en", prompt="Oblivion 306").transcribe_batch(_pcm_chunk(5), 16000))
+
+    assert "prompt" not in calls[0]
+    assert calls[1]["prompt"] == "Oblivion 306"

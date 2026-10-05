@@ -10,6 +10,7 @@ class SttConfig:
     engine: str
     language: str
     openai_api_key: str
+    prompt: str = ""
     gate_enabled: bool = False
     gate_model: str = "tiny.en"
     gate_prompt: str = "Oblivion 306"
@@ -20,6 +21,7 @@ class SttConfig:
             engine=env.get("STT_ENGINE", "openai").lower(),
             language=env.get("STT_LANGUAGE", "en").strip() or "en",
             openai_api_key=env.get("OPENAI_API_KEY", ""),
+            prompt=env.get("STT_PROMPT", "").strip(),
             gate_enabled=env.get("STT_GATE_ENABLED", "0").strip().lower() in _TRUE,
             gate_model=env.get("STT_GATE_MODEL", "tiny.en").strip() or "tiny.en",
             gate_prompt=env.get("STT_GATE_PROMPT", "Oblivion 306").strip(),

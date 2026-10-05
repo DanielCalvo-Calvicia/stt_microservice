@@ -47,8 +47,11 @@ def _remove_temp_file(path: str) -> None:
         logger.warning("Failed to remove temporary WAV file", path=path)
 
 
-def _call_whisper_api(client: OpenAI, wav_path: str, language: str) -> str:
-    logger.info("Calling OpenAI transcription API", model=_WHISPER_MODEL, language=language)
+def _call_whisper_api(client: OpenAI, wav_path: str, language: str, prompt: str = "") -> str:
+    logger.info("Calling OpenAI transcription API", model=_WHISPER_MODEL, language=language, prompted=bool(prompt))
+    options: dict[str, object] = {}
+    if prompt:
+        options["prompt"] = prompt  # words the model should spell the way they are written here
     with open(wav_path, "rb") as audio_file:
         result = client.audio.transcriptions.create(
             model=_WHISPER_MODEL,
@@ -56,6 +59,7 @@ def _call_whisper_api(client: OpenAI, wav_path: str, language: str) -> str:
             language=language,
             temperature=0.0,
             response_format="text",
+            **options,
         )
     return result.strip() if isinstance(result, str) else str(result)
 
@@ -67,7 +71,9 @@ class _OpenAITextStream(AsyncIterator[str]):
         audio_stream: AsyncIterator[bytes],
         client: OpenAI,
         language: str,
+        prompt: str = "",
     ) -> None:
+        self._prompt = prompt
         self._settings = settings
         self._audio_stream = audio_stream
         self._client = client
@@ -235,29 +241,30 @@ class _OpenAITextStream(AsyncIterator[str]):
     def _transcribe_with_openai(self, raw_pcm: bytes, sample_rate: int) -> str:
         wav_path = _write_wav_file(raw_pcm, sample_rate)
         try:
-            return _call_whisper_api(self._client, wav_path, self._language)
+            return _call_whisper_api(self._client, wav_path, self._language, self._prompt)
         finally:
             _remove_temp_file(wav_path)
 
 
 class OpenAIWhisperTranscription(TranscriptionPort):
-    def __init__(self, api_key: str, language: str = "en") -> None:
+    def __init__(self, api_key: str, language: str = "en", prompt: str = "") -> None:
         self._api_key = api_key
         self._language = language or "en"
+        self._prompt = prompt
         logger.info("OpenAIWhisperTranscription initialized", language=self._language)
 
     async def transcribe_stream(
         self, settings: StreamSettings, audio_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[str]:
         return _OpenAITextStream(
-            settings, audio_stream, OpenAI(api_key=self._api_key), self._language
+            settings, audio_stream, OpenAI(api_key=self._api_key), self._language, self._prompt
         )
 
     async def transcribe_batch(self, audio_data: bytes, sample_rate: int) -> str:
         client = OpenAI(api_key=self._api_key)
         wav_path = _write_wav_file(audio_data, sample_rate)
         try:
-            text = await asyncio.to_thread(_call_whisper_api, client, wav_path, self._language)
+            text = await asyncio.to_thread(_call_whisper_api, client, wav_path, self._language, self._prompt)
         finally:
             _remove_temp_file(wav_path)
         logger.info("OpenAI batch transcription completed", text_length=len(text))

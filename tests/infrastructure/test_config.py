@@ -51,3 +51,8 @@ def test_gate_settings_are_read_from_the_environment():
     cfg = SttConfig.from_env({"STT_GATE_ENABLED": "TRUE", "STT_GATE_MODEL": " base.en ", "STT_GATE_PROMPT": "Robot 7"})
     assert (cfg.gate_enabled, cfg.gate_model, cfg.gate_prompt) == (True, "base.en", "Robot 7")
     assert SttConfig.from_env({"STT_GATE_ENABLED": "no"}).gate_enabled is False
+
+
+def test_the_openai_prompt_is_empty_by_default_and_comes_from_the_environment():
+    assert SttConfig.from_env({}).prompt == ""
+    assert SttConfig.from_env({"STT_PROMPT": " Oblivion 306 "}).prompt == "Oblivion 306"

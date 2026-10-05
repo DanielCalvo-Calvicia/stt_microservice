@@ -21,7 +21,7 @@ def new_transcription(cfg: SttConfig) -> TranscriptionPort:
             OpenAIWhisperTranscription,
         )
 
-        return OpenAIWhisperTranscription(api_key=cfg.openai_api_key, language=cfg.language)
+        return OpenAIWhisperTranscription(api_key=cfg.openai_api_key, language=cfg.language, prompt=cfg.prompt)
 
     from infrastructure.outbound.local_whisper.local_whisper_transcription import (
         LocalWhisperTranscription,

@@ -19,6 +19,7 @@ python main.py
 | `LOG_LEVEL` | `INFO` | Read by the shared logging module (`TRACE`, `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`, `CRITICAL`) |
 | `STT_ENGINE` | `openai` | `openai` = Whisper API (`whisper-1`); any other value (e.g. `local`) = local faster-whisper (`small.en`, CPU, int8). Case-insensitive |
 | `STT_LANGUAGE` | `en` | ISO-639-1 code forced on the transcription (empty falls back to `en`) |
+| `STT_PROMPT` | empty | OpenAI engine only: words the model should spell as written (e.g. `Oblivion 306`). Empty = no hint |
 | `STT_GATE_ENABLED` | `0` | `1` = also run the wake-phrase gate: a second, local engine under `/gate/...` (see below) |
 | `STT_GATE_MODEL` | `tiny.en` | faster-whisper model of the gate (small and fast, run with greedy decoding) |
 | `STT_GATE_PROMPT` | `Oblivion 306` | Hint given to the gate engine so it spells the wake phrase right (empty = none) |
