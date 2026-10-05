@@ -3,7 +3,7 @@ from shared_logging import TracingMiddleware, get_logger
 
 from application.errors import EngineNotConfigured
 from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from application.ports.outbound.transcription_port import TranscriptionPort, UtteranceTranscriptionPort
+from application.ports.outbound.transcription_port import TranscriptionPort
 from application.services.stt_service import SttService
 from infrastructure.config.stt_config import SttConfig
 from infrastructure.inbound.http.http_handler import GATE_PREFIX, SttHandler
@@ -30,8 +30,8 @@ def new_transcription(cfg: SttConfig) -> TranscriptionPort:
     return LocalWhisperTranscription(language=cfg.language)
 
 
-def new_gate_transcription(cfg: SttConfig) -> UtteranceTranscriptionPort:
-    """The wake-phrase gate's engine: a small local model, free to run on every utterance, that returns the audio too.
+def new_gate_transcription(cfg: SttConfig) -> TranscriptionPort:
+    """The wake-phrase gate's engine: a small local model, free to run on every utterance.
 
     ``beam_size=1`` (greedy decoding) keeps it fast; ``gate_prompt`` biases the model toward the phrase it listens for.
     """

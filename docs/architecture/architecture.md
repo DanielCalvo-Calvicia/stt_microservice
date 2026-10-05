@@ -18,7 +18,7 @@ SttHandler ──▶ SttTranscriptionPort ◀── SttService ──▶ Transcr
 (inbound)      (driving port)           (application)    (driven port)    ◀── LocalWhisperTranscription
                                              │                                   (outbound)
                                              ▼
-                              domain: StreamSettings, PcmChunkAligner, silence rules
+                              domain: AudioUtterance, Utterance
 ```
 
 `tests/architecture/test_dependency_rules.py` enforces this by parsing imports:
@@ -39,22 +39,21 @@ main.py                           calls main_flow.http.run_http()
 main_flow/
   http.py                         .env -> config -> container -> uvicorn -> shutdown cleanup
 domain/
-  errors.py                       DomainError, InvalidStreamSettings
-  value_objects/stream_settings.py StreamSettings(sample_rate, chunk_size, silence_threshold, silence_limit_seconds)
-  operations/pcm.py               PcmChunkAligner: never split a 16-bit sample across chunks
-  operations/silence.py           silence_limit_chunks, silence_boundary_chunks
+  errors.py                       DomainError, InvalidAudioUtterance
+  value_objects/audio_utterance.py AudioUtterance(audio, sample_rate): whole 16-bit samples at a positive rate
+  value_objects/utterance.py     Utterance(text, audio): what the wake-phrase gate's stream yields
 application/
-  errors.py                       ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured, StreamSettingsMismatch
+  errors.py                       ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured, UnsupportedInput
   dtos/                           ProcessStreamInboundDTO, SetStreamInboundDTO, ProcessBatchInboundDTO,
-                                  CompletedAudioSegment, TextStreamOutboundDTO, BatchTranscriptionOutboundDTO
+                                  TextStreamOutboundDTO, BatchTranscriptionOutboundDTO
   ports/inbound/stt_transcription_port.py   SttTranscriptionPort (driving)
   ports/outbound/transcription_port.py      TranscriptionPort (driven)
-  services/stt_service.py         SttService — validates settings, owns the shared stream, no rules of its own
+  services/stt_service.py         SttService — transcribes each utterance, owns the shared stream, no rules of its own
 infrastructure/
   config/                         ServerConfig, SttConfig (env -> frozen dataclasses)
   inbound/http/                   http_handler.py (SttHandler), http_envelope.py, http_error_mapper.py,
                                   stream_events.py (SSE/NDJSON encoding), input_stream_response.py,
-                                  ndjson_audio_input.py (STT inbound contract events -> audio)
+                                  ndjson_audio_input.py (STT inbound contract events -> utterances)
   outbound/openai_whisper/        openai_whisper_transcription.py
   outbound/local_whisper/         local_whisper_transcription.py
 composition_root/
@@ -94,3 +93,13 @@ tests/  domain/ application/ infrastructure/ composition_root/ architecture/   (
    loud from the very first chunk is not detected as speech until a quieter chunk lowers that floor.
 3. The local model (`small.en`) and the OpenAI model (`whisper-1`) are constants, not configuration.
 4. `tests/simple.py` is an end-to-end script that needs a running service and real audio.
+
+## 2026-10-05: silence detection moved to the microphone
+
+STT no longer cuts audio into utterances. `StreamSettings`, `PcmChunkAligner`, the silence rules and both engines'
+voice-activity loops (the OpenAI engine's noise-floor tracking, the local engine's DC-offset removal) are gone from
+here; they live in `microphone_microservice` (`UtteranceSegmenter`, `InputTreatment`), each treatment switched on or off
+by its own `MICROPHONE_*` variable. The microphone sends one `utterance` event per utterance (contracts 0.12.0), Brain
+relays it as an STT inbound `utterance` event, and an engine is now only `transcribe_batch` + `is_available`. The stream
+routes take no query settings; a raw-PCM upload is a 415. The wake-phrase gate's engine is an ordinary engine: the
+service itself pairs each text with the audio it came from.

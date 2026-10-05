@@ -1,8 +1,7 @@
 """HTTP inbound adapter: decode -> call the inbound port -> encode. No business rules."""
 
 import time
-from collections.abc import AsyncIterator, Callable
-from typing import Any
+from collections.abc import AsyncIterator
 
 from contracts.api.microservices.common.availability import AvailabilityResponse
 from contracts.api.microservices.common.health_check import HealthCheckResponse
@@ -14,12 +13,12 @@ from shared_logging import get_logger
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
 from application.dtos.set_stream_inbound import SetStreamInboundDTO
-from application.errors import NoActiveStream, StreamSettingsMismatch
+from application.errors import NoActiveStream, UnsupportedInput
 from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from domain.value_objects.stream_settings import StreamSettings
+from domain.value_objects.audio_utterance import AudioUtterance
 from infrastructure.inbound.http.http_envelope import failure, failure_message, success
 from infrastructure.inbound.http.input_stream_response import InputStreamResponse
-from infrastructure.inbound.http.ndjson_audio_input import ndjson_audio_stream
+from infrastructure.inbound.http.ndjson_audio_input import ndjson_utterances
 from infrastructure.inbound.http.stream_events import (
     Formatter,
     ndjson_format,
@@ -29,7 +28,7 @@ from infrastructure.inbound.http.stream_events import (
 
 logger = get_logger(__name__)
 
-_DEFAULTS = StreamSettings()
+_DEFAULT_BATCH_SAMPLE_RATE = 16000
 _NDJSON = "application/x-ndjson"
 _SSE = "text/event-stream"
 _GET_HEARTBEAT_SECONDS = 15.0
@@ -60,12 +59,23 @@ async def _request_body_chunks(request: Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _utterances_of(request: Request) -> AsyncIterator[AudioUtterance]:
+    """The utterances in the request body: NDJSON events of the STT inbound contract, nothing else."""
+    if not _is_ndjson_request(request):
+        raise UnsupportedInput(
+            "the body must be NDJSON events of the STT inbound contract (Content-Type: application/x-ndjson)"
+        )
+    return ndjson_utterances(_request_body_chunks(request))
+
+
 GATE_PREFIX = "/gate"
 
 
 class SttHandler:
     """The STT routes. The main handler has all of them; the wake-phrase gate has its own, under ``/gate``, with only
-    the shared stream (``set``/``get``), ``available`` and ``stop``, and its ``completed`` events carry the audio."""
+    the shared stream (``set``/``get``), ``available`` and ``stop``, and its ``completed`` events carry the audio.
+
+    The audio comes in as utterances, already cut by the microphone: STT does no silence detection."""
 
     def __init__(
         self,
@@ -112,23 +122,10 @@ class SttHandler:
             return failure("stop_stream", "Failed to stop stream", error)
         return success("stop_stream", "Stream stopped successfully")
 
-    async def handle_process_stream(
-        self,
-        request: Request,
-        sample_rate: int = _DEFAULTS.sample_rate,
-        chunk_size: int = _DEFAULTS.chunk_size,
-        silence_threshold: int = _DEFAULTS.silence_threshold,
-        silence_limit_seconds: float = _DEFAULTS.silence_limit_seconds,
-    ) -> Response:
+    async def handle_process_stream(self, request: Request) -> Response:
         try:
             result = await self._port.process_stream(
-                ProcessStreamInboundDTO(
-                    audio_stream=_request_body_chunks(request),
-                    sample_rate=sample_rate,
-                    chunk_size=chunk_size,
-                    silence_threshold=silence_threshold,
-                    silence_limit_seconds=silence_limit_seconds,
-                )
+                ProcessStreamInboundDTO(utterances=_utterances_of(request))
             )
         except Exception as error:
             return failure("process_stream", "Failed to process stream", error)
@@ -139,34 +136,9 @@ class SttHandler:
             headers=_stream_headers("process_stream", "success", "Stream processed successfully"),
         )
 
-    async def handle_set_stream(
-        self,
-        request: Request,
-        sample_rate: int = _DEFAULTS.sample_rate,
-        chunk_size: int = _DEFAULTS.chunk_size,
-        silence_threshold: int = _DEFAULTS.silence_threshold,
-        silence_limit_seconds: float = _DEFAULTS.silence_limit_seconds,
-    ) -> Response:
+    async def handle_set_stream(self, request: Request) -> Response:
         try:
-            audio_stream: AsyncIterator[Any] = _request_body_chunks(request)
-            if _is_ndjson_request(request):
-                logger.info("Set stream using NDJSON audio event input")
-                audio_stream = ndjson_audio_stream(
-                    audio_stream,
-                    StreamSettings(
-                        sample_rate=sample_rate,
-                        chunk_size=chunk_size,
-                        silence_threshold=silence_threshold,
-                        silence_limit_seconds=silence_limit_seconds,
-                    ),
-                )
-            dto = SetStreamInboundDTO(
-                audio_stream=audio_stream,
-                sample_rate=sample_rate,
-                chunk_size=chunk_size,
-                silence_threshold=silence_threshold,
-                silence_limit_seconds=silence_limit_seconds,
-            )
+            dto = SetStreamInboundDTO(utterances=_utterances_of(request))
         except Exception as error:
             return failure("set_stream", "Failed to set stream", error)
 
@@ -185,25 +157,9 @@ class SttHandler:
             ),
         )
 
-    async def handle_get_stream(
-        self,
-        request: Request,
-        sample_rate: int | None = None,
-        chunk_size: int | None = None,
-        silence_threshold: int | None = None,
-        silence_limit_seconds: float | None = None,
-    ) -> Response:
-        """Read the transcripts of the stream set with ``/process/stream/set``.
-
-        The stream's settings were fixed by ``set``; any of them repeated here must match.
-        """
+    async def handle_get_stream(self, request: Request) -> Response:
+        """Read the transcripts of the stream set with ``/process/stream/set``."""
         try:
-            self._check_matches_active_settings(
-                sample_rate=sample_rate,
-                chunk_size=chunk_size,
-                silence_threshold=silence_threshold,
-                silence_limit_seconds=silence_limit_seconds,
-            )
             result = await self._port.get_stream()
         except NoActiveStream as error:
             logger.warning("Get stream rejected", error=error)
@@ -226,7 +182,7 @@ class SttHandler:
         )
 
     async def handle_process_batch(
-        self, request: Request, sample_rate: int = _DEFAULTS.sample_rate
+        self, request: Request, sample_rate: int = _DEFAULT_BATCH_SAMPLE_RATE
     ) -> JSONResponse:
         try:
             audio_data = await request.body()
@@ -248,16 +204,6 @@ class SttHandler:
             "Audio processed successfully",
             STTProcessBatchResponse(text=result.text),
         )
-
-    def _check_matches_active_settings(self, **given: float | None) -> None:
-        active = self._port.current_settings()
-        if active is None:
-            return  # nothing set yet: get_stream reports NoActiveStream
-        for name, value in given.items():
-            if value is not None and value != getattr(active, name):
-                raise StreamSettingsMismatch(
-                    f"{name}={value} differs from the active stream's {name}={getattr(active, name)}"
-                )
 
     @staticmethod
     def _output_format(request: Request) -> tuple[Formatter, str]:

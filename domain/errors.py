@@ -9,5 +9,5 @@ class DomainError(Exception):
     """Base class for every business-rule violation raised by the domain."""
 
 
-class InvalidStreamSettings(DomainError, ValueError):
-    """The requested stream settings violate an invariant (e.g. non-positive chunk size)."""
+class InvalidAudioUtterance(DomainError, ValueError):
+    """An utterance violates an invariant (e.g. a non-positive sample rate or half a sample of audio)."""

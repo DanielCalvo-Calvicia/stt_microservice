@@ -1,6 +1,6 @@
 # STT Microservice
 
-HTTP service that turns 16-bit mono PCM audio into text, using the OpenAI Whisper API or a local `faster-whisper` model. It segments the audio into utterances by silence detection and answers with `contracts.stream` events. Only Brain calls it.
+HTTP service that turns finished utterances (16-bit mono PCM) into text, using the OpenAI Whisper API or a local `faster-whisper` model. It does no silence detection: the microphone service cuts the audio into utterances and Brain hands each one over (`utterance` events of the STT inbound contract). It answers with `contracts.stream` events. Only Brain calls it.
 
 ## Run
 
@@ -33,18 +33,18 @@ python main.py
 |---|---|---|
 | GET | `/health` | Liveness |
 | GET | `/available` | `data` is `AvailabilityResponse{is_available}`: whether the engine is ready |
-| POST | `/process/stream` | Body is raw PCM. Answers with SSE events: `stream_started`, then `partial` + `completed` per utterance |
-| POST | `/process/stream/set` | Brain's upload: body is raw PCM, or `contracts.stream` NDJSON events (`Content-Type: application/x-ndjson`, `STT_INBOUND`). Answers with an ack stream (`stream_started`, then `input_completed` when the sender ended, or `error`): SSE by default, NDJSON when `Accept: application/x-ndjson` |
+| POST | `/process/stream` | Body is NDJSON `utterance` events (`STT_INBOUND`). Answers with SSE events: `stream_started`, then `partial` + `completed` per utterance |
+| POST | `/process/stream/set` | Brain's upload: body is `contracts.stream` NDJSON events (`Content-Type: application/x-ndjson`, `STT_INBOUND`: `stream_started`, one `utterance` per finished utterance with its `bytes_base64` and `sample_rate`; a `completed` event that carries audio is one more utterance). Any other body is a 415. Answers with an ack stream (`stream_started`, then `input_completed` when the sender ended, or `error`): SSE by default, NDJSON when `Accept: application/x-ndjson` |
 | GET | `/process/stream/get` | Reads the shared stream's text events (`STT_OUTBOUND`): SSE by default, NDJSON with `Accept: application/x-ndjson`; a `heartbeat` every 15 s when idle. 404 if nothing was set |
 | POST | `/stop` | Stops the shared stream |
 | POST | `/process/batch?sample_rate=16000` | Body is one PCM buffer; `data` is `STTProcessBatchResponse{text}`. 400 if the body is empty |
 | POST/GET | `/gate/process/stream/set`, `/gate/process/stream/get` (only with `STT_GATE_ENABLED=1`) | Same as the stream routes, on the gate's own shared stream and local engine. Each `completed` event also carries the utterance's audio in `audio_base64` (PCM16 mono), so Brain can send it to the real engine when the wake phrase was heard. `/gate/available` and `/available` report the gate too |
 
-Stream endpoints take `sample_rate` (16000), `chunk_size` (1024), `silence_threshold` (150) and `silence_limit_seconds` (2.0) as query parameters. Utterances end after `silence_limit_seconds` of silence. On `/process/stream/get` the same names may be repeated but must match the stream that `set` fixed (else 422).
+The stream endpoints take no settings: each utterance carries its own sample rate, and where an utterance ends is decided by the microphone (`MICROPHONE_SILENCE_*` and the other `MICROPHONE_*` treatments, see its README). Every utterance is transcribed as one batch.
 
-Every `partial` carries the same text as the `completed` after it: the engines only produce finished utterances. Audio is PCM16 mono and is never converted here.
+Every `partial` carries the same text as the `completed` after it: the engines only produce finished utterances. Audio is PCM16 mono; the only conversion is the engine's own (the local engine resamples to Whisper's 16 kHz when an utterance has another rate).
 
-JSON responses use the envelope `action / status / status_code / message / timestamp / data` (`contracts.api.common.envelope.ApiEnvelope`). Failures map to HTTP status codes in `infrastructure/inbound/http/http_error_mapper.py`: `404` no stream set, `422` invalid stream settings or settings that differ from the active stream, `500` anything else (engine or stream failure), and `400` for an empty batch body. There is no authentication.
+JSON responses use the envelope `action / status / status_code / message / timestamp / data` (`contracts.api.common.envelope.ApiEnvelope`). Failures map to HTTP status codes in `infrastructure/inbound/http/http_error_mapper.py`: `404` no stream set, `415` a stream body that is not NDJSON events, `422` an invalid utterance (non-positive sample rate), `500` anything else (engine or stream failure), and `400` for an empty batch body. There is no authentication.
 
 ## Project layout
 
@@ -52,9 +52,9 @@ JSON responses use the envelope `action / status / status_code / message / times
 main.py            entry point (calls main_flow)
 main_flow/         .env, config, logging init, uvicorn, graceful shutdown
 composition_root/  the only place concrete adapters are wired together (engine choice)
-infrastructure/    config, HTTP (inbound: handler, envelope, error mapper, SSE/NDJSON encoding, NDJSON audio decoder) and Whisper engines (outbound)
+infrastructure/    config, HTTP (inbound: handler, envelope, error mapper, SSE/NDJSON encoding, NDJSON utterance decoder) and Whisper engines (outbound)
 application/       use-case service, ports, DTOs, application errors
-domain/            stream settings, PCM alignment and silence rules
+domain/            the utterance value objects
 ```
 
 Dependencies point inward only (`infrastructure -> application -> domain`); `tests/architecture/` enforces this.

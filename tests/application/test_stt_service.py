@@ -3,86 +3,61 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from application.dtos.completed_audio_segment import CompletedAudioSegment
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
 from application.dtos.set_stream_inbound import SetStreamInboundDTO
 from application.errors import NoActiveStream, SharedStreamForwardingError
 from application.ports.outbound.transcription_port import TranscriptionPort
 from application.services.stt_service import SttService
-from domain.errors import InvalidStreamSettings
-from domain.value_objects.stream_settings import StreamSettings
+from domain.value_objects.audio_utterance import AudioUtterance
+from domain.value_objects.utterance import Utterance
 
 
 class FakeTranscription(TranscriptionPort):
-    """Streams one text per non-empty audio chunk; batches echo their byte count."""
+    """Hears ``heard <bytes>`` in every utterance (with blanks around, like a real engine)."""
 
     def __init__(self, fail_with: Exception | None = None, available: bool = True) -> None:
-        self.settings: list[StreamSettings] = []
         self.batches: list[tuple[bytes, int]] = []
         self.fail_with = fail_with
         self.available = available
 
-    async def transcribe_stream(
-        self, settings: StreamSettings, audio_stream: AsyncIterator[bytes]
-    ) -> AsyncIterator[str]:
-        self.settings.append(settings)
-
-        async def texts() -> AsyncIterator[str]:
-            async for chunk in audio_stream:
-                if self.fail_with is not None:
-                    raise self.fail_with
-                if chunk:
-                    yield f"heard {len(chunk)}"
-
-        return texts()
-
     async def transcribe_batch(self, audio_data: bytes, sample_rate: int) -> str:
+        if self.fail_with is not None:
+            raise self.fail_with
         self.batches.append((audio_data, sample_rate))
-        return f"  batch {len(audio_data)}  "
+        return f"  heard {len(audio_data)}  " if audio_data.strip(b"\x00") else "   "
 
     def is_available(self) -> bool:
         return self.available
 
 
-async def _audio(*items):
+async def _utterances(*items: AudioUtterance) -> AsyncIterator[AudioUtterance]:
     for item in items:
         yield item
 
 
-async def _collect(stream: AsyncIterator[str]) -> list[str]:
-    return [text async for text in stream]
+def _speech(size: int, rate: int = 16000) -> AudioUtterance:
+    return AudioUtterance(b"\x01\x00" * (size // 2), rate)
 
 
-def test_process_stream_hands_validated_settings_and_audio_to_the_engine():
+SILENCE = AudioUtterance(b"\x00\x00" * 4, 16000)
+
+
+async def _collect(stream) -> list:
+    return [item async for item in stream]
+
+
+def test_process_stream_transcribes_each_utterance_at_its_own_rate_and_skips_the_empty_ones():
     async def run() -> None:
         engine = FakeTranscription()
         service = SttService(engine)
 
         result = await service.process_stream(
-            ProcessStreamInboundDTO(
-                audio_stream=_audio(b"ab", b"", b"cde"), sample_rate=8000, chunk_size=512
-            )
+            ProcessStreamInboundDTO(utterances=_utterances(_speech(4, 8000), SILENCE, _speech(6)))
         )
 
-        assert await _collect(result.text_stream) == ["heard 2", "heard 3"]
-        assert engine.settings == [StreamSettings(sample_rate=8000, chunk_size=512)]
-
-    asyncio.run(run())
-
-
-def test_invalid_settings_are_rejected_before_reaching_the_engine():
-    async def run() -> None:
-        engine = FakeTranscription()
-        service = SttService(engine)
-
-        with pytest.raises(InvalidStreamSettings):
-            await service.process_stream(
-                ProcessStreamInboundDTO(audio_stream=_audio(), chunk_size=0)
-            )
-        with pytest.raises(InvalidStreamSettings):
-            await service.set_stream(SetStreamInboundDTO(audio_stream=_audio(), sample_rate=0))
-        assert engine.settings == []
+        assert await _collect(result.text_stream) == ["heard 4", "heard 6"]
+        assert [rate for _, rate in engine.batches] == [8000, 16000, 16000]
 
     asyncio.run(run())
 
@@ -93,7 +68,7 @@ def test_process_batch_returns_the_engine_text():
         result = await SttService(engine).process_batch(
             ProcessBatchInboundDTO(audio_data=b"abcd", sample_rate=8000)
         )
-        assert result.text == "  batch 4  "
+        assert result.text == "  heard 4  "
         assert engine.batches == [(b"abcd", 8000)]
 
     asyncio.run(run())
@@ -116,31 +91,41 @@ def test_no_active_stream_is_still_a_runtime_error():
     assert issubclass(NoActiveStream, RuntimeError)
 
 
-def test_set_stream_forwards_engine_text_to_get_stream():
+def test_set_stream_forwards_each_utterances_text_to_get_stream():
     async def run() -> None:
         service = SttService(FakeTranscription())
 
-        await service.set_stream(SetStreamInboundDTO(audio_stream=_audio(b"ab", b"cde")))
+        await service.set_stream(SetStreamInboundDTO(utterances=_utterances(_speech(2), _speech(4))))
         result = await service.get_stream()
 
-        assert await _collect(result.text_stream) == ["heard 2", "heard 3"]
+        assert await _collect(result.text_stream) == ["heard 2", "heard 4"]
 
     asyncio.run(run())
 
 
-def test_completed_segments_are_transcribed_as_batches_and_stripped():
+def test_the_gate_stream_yields_utterances_with_the_audio_they_came_from():
     async def run() -> None:
-        engine = FakeTranscription()
-        service = SttService(engine)
-        segment = CompletedAudioSegment(audio_data=b"wxyz", source_sequence=7)
+        service = SttService(FakeTranscription(), "gate", with_audio=True)
 
         await service.set_stream(
-            SetStreamInboundDTO(audio_stream=_audio(b"ab", segment), sample_rate=8000)
+            SetStreamInboundDTO(utterances=_utterances(_speech(2), SILENCE, _speech(4)))
         )
         result = await service.get_stream()
 
-        assert await _collect(result.text_stream) == ["heard 2", "batch 4"]
-        assert engine.batches == [(b"wxyz", 8000)]
+        assert await _collect(result.text_stream) == [
+            Utterance("heard 2", b"\x01\x00"),
+            Utterance("heard 4", b"\x01\x00\x01\x00"),
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_plain_service_yields_text_only():
+    async def run() -> None:
+        service = SttService(FakeTranscription())
+        await service.set_stream(SetStreamInboundDTO(utterances=_utterances(_speech(2))))
+
+        assert await _collect((await service.get_stream()).text_stream) == ["heard 2"]
 
     asyncio.run(run())
 
@@ -149,7 +134,7 @@ def test_an_engine_failure_reaches_the_reader_of_the_shared_stream():
     async def run() -> None:
         service = SttService(FakeTranscription(fail_with=RuntimeError("backend down")))
 
-        await service.set_stream(SetStreamInboundDTO(audio_stream=_audio(b"ab")))
+        await service.set_stream(SetStreamInboundDTO(utterances=_utterances(_speech(2))))
         result = await service.get_stream()
 
         with pytest.raises(SharedStreamForwardingError, match="backend down"):
@@ -164,12 +149,10 @@ def test_stop_stream_cancels_a_running_set_stream():
         gate = asyncio.Event()
 
         async def endless():
-            yield b"ab"
+            yield _speech(2)
             await gate.wait()
 
-        set_task = asyncio.create_task(
-            service.set_stream(SetStreamInboundDTO(audio_stream=endless()))
-        )
+        set_task = asyncio.create_task(service.set_stream(SetStreamInboundDTO(utterances=endless())))
         await asyncio.sleep(0.05)
 
         await service.stop_stream()
@@ -183,7 +166,7 @@ def test_stop_stream_cancels_a_running_set_stream():
 def test_stop_stream_after_completion_ends_the_text_stream():
     async def run() -> None:
         service = SttService(FakeTranscription())
-        await service.set_stream(SetStreamInboundDTO(audio_stream=_audio(b"ab")))
+        await service.set_stream(SetStreamInboundDTO(utterances=_utterances(_speech(2))))
 
         await service.stop_stream()
         result = await service.get_stream()

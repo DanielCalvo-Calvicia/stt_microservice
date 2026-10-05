@@ -7,38 +7,30 @@ from typing import Any
 
 import numpy as np
 
-from domain.value_objects.stream_settings import StreamSettings
 from infrastructure.outbound.local_whisper.local_whisper_transcription import (
     LocalWhisperTranscription,
-    _LocalTextStream,
     _pcm_to_whisper_input,
 )
 from infrastructure.outbound.openai_whisper import openai_whisper_transcription as openai_module
 from infrastructure.outbound.openai_whisper.openai_whisper_transcription import (
     OpenAIWhisperTranscription,
-    _OpenAITextStream,
 )
-
-SETTINGS = StreamSettings(sample_rate=16000, chunk_size=1024, silence_threshold=150)
-
-
-async def _audio_stream(chunks: list[bytes]):
-    for chunk in chunks:
-        yield chunk
 
 
 def _pcm_chunk(value: int, samples: int = 1024) -> bytes:
     return np.full(samples, value, dtype=np.int16).tobytes()
 
 
-class FakeLocalModel:
+class RecordingModel:
+    """Stands in for faster-whisper's model: remembers how it was asked, answers a fixed text."""
+
     def __init__(self) -> None:
-        self.language: str | None = None
-        self.calls = 0
+        self.kwargs: dict[str, Any] = {}
+        self.samples: Any = None
 
     def transcribe(self, audio_data: Any, **kwargs: Any):
-        self.language = kwargs["language"]
-        self.calls += 1
+        self.samples = audio_data
+        self.kwargs = kwargs
 
         class Segment:
             text = " final local text"
@@ -46,39 +38,12 @@ class FakeLocalModel:
         return [Segment()], None
 
 
-def test_local_stream_flushes_final_buffer_when_audio_input_ends():
-    async def run() -> str:
-        model = FakeLocalModel()
-        stream = _LocalTextStream(SETTINGS, _audio_stream([_pcm_chunk(10000)]), model, "es")
-        text = await stream.__anext__()
-        assert model.language == "es"
-        return text
-
-    assert asyncio.run(run()) == "final local text"
-
-
-def test_local_stream_ends_after_the_last_utterance():
-    async def run() -> list[str]:
-        stream = _LocalTextStream(
-            SETTINGS, _audio_stream([_pcm_chunk(10000)]), FakeLocalModel(), "en"
-        )
-        return [text async for text in stream]
-
-    assert asyncio.run(run()) == ["final local text"]
-
-
-def test_local_stream_splits_utterances_on_silence():
-    async def run() -> list[str]:
-        settings = StreamSettings(16000, 1024, 150, 0.1)  # 1 silent chunk ends an utterance
-        loud, quiet = _pcm_chunk(10000), _pcm_chunk(0)
-        chunks = [loud] * 3 + [quiet] * 60 + [loud] * 3 + [quiet] * 60
-        model = FakeLocalModel()
-        stream = _LocalTextStream(settings, _audio_stream(chunks), model, "en")
-        texts = [text async for text in stream]
-        assert model.calls == 2
-        return texts
-
-    assert asyncio.run(run()) == ["final local text", "final local text"]
+def _local_engine(monkeypatch, model: RecordingModel, **kwargs: Any) -> LocalWhisperTranscription:
+    monkeypatch.setattr(
+        "infrastructure.outbound.local_whisper.local_whisper_transcription.WhisperModel",
+        lambda *args, **options: model,
+    )
+    return LocalWhisperTranscription(**kwargs)
 
 
 def test_pcm_is_resampled_to_16k_for_whisper():
@@ -86,73 +51,36 @@ def test_pcm_is_resampled_to_16k_for_whisper():
     assert samples.dtype == np.float32 and len(samples) == 16000
 
 
-def test_local_batch_transcription_and_availability(monkeypatch):
-    fake = types.ModuleType("faster_whisper")
-    fake.WhisperModel = lambda *args, **kwargs: FakeLocalModel()  # type: ignore[attr-defined]
-    monkeypatch.setattr(
-        "infrastructure.outbound.local_whisper.local_whisper_transcription.WhisperModel",
-        fake.WhisperModel,
-    )
-    engine = LocalWhisperTranscription(language="es")
+def test_pcm_already_at_16k_is_only_scaled():
+    samples = _pcm_to_whisper_input(_pcm_chunk(16384, 100), 16000)
+    assert len(samples) == 100 and float(samples[0]) == 0.5
+
+
+def test_local_engine_transcribes_one_utterance_and_is_available(monkeypatch):
+    model = RecordingModel()
+    engine = _local_engine(monkeypatch, model, language="es")
 
     text = asyncio.run(engine.transcribe_batch(_pcm_chunk(1000), 16000))
 
     assert text == " final local text"
+    assert model.kwargs["language"] == "es"
     assert engine.is_available() is True
 
 
-def test_openai_stream_flushes_final_buffer_when_audio_input_ends():
-    async def run() -> str:
-        stream = _OpenAITextStream(SETTINGS, _audio_stream([]), client=object(), language="en")  # type: ignore[arg-type]
-        stream._is_speaking = True
-        stream._audio_buffer.extend(_pcm_chunk(1000))
+def test_local_engine_sends_no_prompt_unless_it_has_one_and_uses_beam_5_by_default(monkeypatch):
+    model = RecordingModel()
+    asyncio.run(_local_engine(monkeypatch, model).transcribe_batch(_pcm_chunk(1000), 16000))
 
-        async def fake_transcribe() -> str:
-            stream._reset_buffers()
-            return "final openai text"
-
-        stream._transcribe_utterance = fake_transcribe  # type: ignore[method-assign]
-        return await stream.__anext__()
-
-    assert asyncio.run(run()) == "final openai text"
+    assert "initial_prompt" not in model.kwargs and model.kwargs["beam_size"] == 5
 
 
-def test_openai_stream_transcribes_speech_and_stops_when_audio_ends():
-    async def run() -> list[str]:
-        # The quietest chunk seen becomes the noise floor, so start with some background noise.
-        noise_then_speech = [_pcm_chunk(50)] * 5 + [_pcm_chunk(10000)] * 3
-        stream = _OpenAITextStream(
-            SETTINGS,
-            _audio_stream(noise_then_speech),
-            client=object(),
-            language="en",  # type: ignore[arg-type]
-        )
-        sent: list[int] = []
+def test_local_engine_passes_its_prompt_and_beam_size_to_the_model(monkeypatch):
+    model = RecordingModel()
+    engine = _local_engine(monkeypatch, model, initial_prompt="Oblivion 306", beam_size=1)
 
-        def fake_transcribe(raw_pcm: bytes, sample_rate: int) -> str:
-            sent.append(len(raw_pcm))
-            return "hello"
+    asyncio.run(engine.transcribe_batch(_pcm_chunk(1000), 16000))
 
-        stream._transcribe_with_openai = fake_transcribe  # type: ignore[method-assign]
-        texts = [text async for text in stream]
-        assert sent  # the speech that was heard was sent, in whole samples
-        assert all(n % 2 == 0 for n in sent)
-        return texts
-
-    assert asyncio.run(run()) == ["hello"]
-
-
-def test_openai_stream_ignores_silence():
-    async def run() -> list[str]:
-        stream = _OpenAITextStream(
-            SETTINGS,
-            _audio_stream([_pcm_chunk(0)] * 5),
-            client=object(),
-            language="en",  # type: ignore[arg-type]
-        )
-        return [text async for text in stream]
-
-    assert asyncio.run(run()) == []
+    assert model.kwargs["initial_prompt"] == "Oblivion 306" and model.kwargs["beam_size"] == 1
 
 
 def test_openai_engine_availability_follows_the_api_key():
@@ -160,9 +88,7 @@ def test_openai_engine_availability_follows_the_api_key():
     assert OpenAIWhisperTranscription(api_key="").is_available() is False
 
 
-def test_openai_batch_calls_the_api_with_a_wav_and_cleans_up(monkeypatch):
-    calls: list[dict[str, Any]] = []
-
+def _fake_openai(monkeypatch, calls: list[dict[str, Any]]) -> None:
     class FakeTranscriptions:
         def create(self, **kwargs: Any) -> str:
             calls.append({**kwargs, "riff": kwargs["file"].read(4)})
@@ -172,9 +98,14 @@ def test_openai_batch_calls_the_api_with_a_wav_and_cleans_up(monkeypatch):
         def __init__(self, api_key: str) -> None:
             self.audio = types.SimpleNamespace(transcriptions=FakeTranscriptions())
 
+    monkeypatch.setattr(openai_module, "OpenAI", FakeClient)
+
+
+def test_openai_batch_calls_the_api_with_a_wav_and_cleans_up(monkeypatch):
+    calls: list[dict[str, Any]] = []
+    _fake_openai(monkeypatch, calls)
     removed: list[str] = []
     real_remove = openai_module._remove_temp_file
-    monkeypatch.setattr(openai_module, "OpenAI", FakeClient)
     monkeypatch.setattr(
         openai_module, "_remove_temp_file", lambda path: (removed.append(path), real_remove(path))
     )
@@ -188,60 +119,32 @@ def test_openai_batch_calls_the_api_with_a_wav_and_cleans_up(monkeypatch):
     assert not os.path.exists(removed[0])
 
 
-def test_gate_stream_yields_the_utterance_audio_with_its_text_and_asks_the_model_for_the_prompt():
-    class RecordingModel(FakeLocalModel):
-        def transcribe(self, audio_data: Any, **kwargs: Any):
-            self.kwargs = kwargs
-            return super().transcribe(audio_data, **kwargs)
-
-    from domain.value_objects.utterance import Utterance
-
-    async def run() -> tuple[Any, RecordingModel]:
-        model = RecordingModel()
-        chunk = _pcm_chunk(10000)
-        stream = _LocalTextStream(
-            SETTINGS, _audio_stream([chunk]), model, "en", initial_prompt="Oblivion 306", beam_size=1, with_audio=True
-        )
-        return (await stream.__anext__(), chunk), model
-
-    (utterance, chunk), model = asyncio.run(run())
-
-    assert utterance == Utterance("final local text", chunk)
-    assert model.kwargs["initial_prompt"] == "Oblivion 306" and model.kwargs["beam_size"] == 1
-
-
-def test_a_plain_local_stream_yields_text_and_sends_no_prompt():
-    class RecordingModel(FakeLocalModel):
-        def transcribe(self, audio_data: Any, **kwargs: Any):
-            self.kwargs = kwargs
-            return super().transcribe(audio_data, **kwargs)
-
-    async def run() -> tuple[Any, RecordingModel]:
-        model = RecordingModel()
-        stream = _LocalTextStream(SETTINGS, _audio_stream([_pcm_chunk(10000)]), model, "en")
-        return await stream.__anext__(), model
-
-    text, model = asyncio.run(run())
-
-    assert text == "final local text" and "initial_prompt" not in model.kwargs and model.kwargs["beam_size"] == 5
-
-
 def test_openai_batch_sends_the_prompt_only_when_there_is_one(monkeypatch):
     calls: list[dict[str, Any]] = []
-
-    class FakeTranscriptions:
-        def create(self, **kwargs: Any) -> str:
-            calls.append(kwargs)
-            return "text"
-
-    class FakeClient:
-        def __init__(self, api_key: str) -> None:
-            self.audio = types.SimpleNamespace(transcriptions=FakeTranscriptions())
-
-    monkeypatch.setattr(openai_module, "OpenAI", FakeClient)
+    _fake_openai(monkeypatch, calls)
 
     asyncio.run(OpenAIWhisperTranscription("k", "en").transcribe_batch(_pcm_chunk(5), 16000))
-    asyncio.run(OpenAIWhisperTranscription("k", "en", prompt="Oblivion 306").transcribe_batch(_pcm_chunk(5), 16000))
+    asyncio.run(
+        OpenAIWhisperTranscription("k", "en", prompt="Oblivion 306").transcribe_batch(
+            _pcm_chunk(5), 16000
+        )
+    )
 
     assert "prompt" not in calls[0]
     assert calls[1]["prompt"] == "Oblivion 306"
+
+
+def test_openai_batch_writes_the_wav_at_the_rate_of_the_utterance(monkeypatch):
+    seen: list[int] = []
+    _fake_openai(monkeypatch, [])
+    real_write = openai_module._write_wav_file
+
+    def spying_write(raw: bytes, rate: int) -> str:
+        seen.append(rate)
+        return real_write(raw, rate)
+
+    monkeypatch.setattr(openai_module, "_write_wav_file", spying_write)
+
+    asyncio.run(OpenAIWhisperTranscription("k").transcribe_batch(_pcm_chunk(5), 44100))
+
+    assert seen == [44100]

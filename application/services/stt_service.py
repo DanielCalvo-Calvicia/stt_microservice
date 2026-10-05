@@ -4,15 +4,14 @@ from collections.abc import AsyncIterator
 from shared_logging import get_logger
 
 from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
-from application.dtos.completed_audio_segment import CompletedAudioSegment
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
 from application.dtos.set_stream_inbound import SetStreamInboundDTO
 from application.dtos.text_stream_outbound import TextStreamOutboundDTO
 from application.errors import NoActiveStream, SharedStreamForwardingError
 from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from application.ports.outbound.transcription_port import TranscriptionPort, UtteranceTranscriptionPort
-from domain.value_objects.stream_settings import StreamSettings
+from application.ports.outbound.transcription_port import TranscriptionPort
+from domain.value_objects.audio_utterance import AudioUtterance
 from domain.value_objects.utterance import Utterance
 
 logger = get_logger(__name__)
@@ -23,59 +22,36 @@ _TextQueue = asyncio.Queue[str | Utterance | Exception | None]
 class SttService(SttTranscriptionPort):
     """Orchestrates the speech-to-text use cases. Business rules live in the domain.
 
-    With ``with_audio`` the shared stream yields ``Utterance`` items (text plus the audio they came from): the
-    wake-phrase gate, whose engine must be an ``UtteranceTranscriptionPort``. Otherwise it yields plain text.
+    It receives finished utterances (the microphone cuts them, STT does no silence detection) and
+    transcribes each one. With ``with_audio`` the shared stream yields ``Utterance`` items (the text
+    plus the audio it came from): the wake-phrase gate. Otherwise it yields plain text.
     """
 
-    def __init__(self, transcription: TranscriptionPort, name: str = "stt_service", *, with_audio: bool = False) -> None:
-        if with_audio and not isinstance(transcription, UtteranceTranscriptionPort):
-            raise TypeError(f"{type(transcription).__name__} cannot return the audio of an utterance")
+    def __init__(
+        self, transcription: TranscriptionPort, name: str = "stt_service", *, with_audio: bool = False
+    ) -> None:
         self.name = name
         self._with_audio = with_audio
         self._transcription = transcription
         self._text_queue: _TextQueue | None = None
-        self._settings: StreamSettings | None = None
         self._stream_task: asyncio.Task[None] | None = None
-        logger.info(
-            "SttService initialized",
-            name=name,
-            engine=type(transcription).__name__,
-        )
+        logger.info("SttService initialized", name=name, engine=type(transcription).__name__)
 
     async def process_stream(self, request: ProcessStreamInboundDTO) -> TextStreamOutboundDTO:
-        settings = StreamSettings(
-            sample_rate=request.sample_rate,
-            chunk_size=request.chunk_size,
-            silence_threshold=request.silence_threshold,
-            silence_limit_seconds=request.silence_limit_seconds,
-        )
-        text_stream = await self._transcription.transcribe_stream(settings, request.audio_stream)
-        return TextStreamOutboundDTO(text_stream=text_stream)
+        return TextStreamOutboundDTO(text_stream=self._transcribed(request.utterances))
 
     async def set_stream(self, request: SetStreamInboundDTO) -> None:
-        settings = StreamSettings(
-            sample_rate=request.sample_rate,
-            chunk_size=request.chunk_size,
-            silence_threshold=request.silence_threshold,
-            silence_limit_seconds=request.silence_limit_seconds,
-        )
         await self._cancel_stream_task()
 
-        self._settings = settings
         queue: _TextQueue = asyncio.Queue()
         self._text_queue = queue
-        self._stream_task = asyncio.create_task(
-            self._forward_stream_to_queue(request, settings, queue)
-        )
+        self._stream_task = asyncio.create_task(self._forward_stream_to_queue(request, queue))
         try:
             await self._stream_task
         except asyncio.CancelledError:
             logger.info("Shared stream set request cancelled")
             raise
         logger.info("Shared stream completed")
-
-    def current_settings(self) -> StreamSettings | None:
-        return self._settings
 
     async def get_stream(self) -> TextStreamOutboundDTO:
         if self._text_queue is None:
@@ -105,41 +81,25 @@ class SttService(SttTranscriptionPort):
             except asyncio.CancelledError:
                 logger.info("Shared stream task cancelled")
 
-    async def _forward_stream_to_queue(
-        self, request: SetStreamInboundDTO, settings: StreamSettings, queue: _TextQueue
-    ) -> None:
-        async def live_audio_stream() -> AsyncIterator[bytes]:
-            async for item in request.audio_stream:
-                if isinstance(item, CompletedAudioSegment):
-                    text = (
-                        await self._transcription.transcribe_batch(
-                            item.audio_data, settings.sample_rate
-                        )
-                    ).strip()
-                    logger.info(
-                        "Completed audio segment transcribed",
-                        source_sequence=item.source_sequence,
-                        text_length=len(text),
-                    )
-                    if text:
-                        await queue.put(Utterance(text, item.audio_data) if self._with_audio else text)
-                    continue
-                yield item
+    async def _transcribed(self, utterances: AsyncIterator[AudioUtterance]) -> AsyncIterator[str | Utterance]:
+        """The text of each utterance, as it arrives; an utterance with no speech in it gives nothing."""
+        async for utterance in utterances:
+            text = (
+                await self._transcription.transcribe_batch(utterance.audio, utterance.sample_rate)
+            ).strip()
+            logger.info(
+                "Utterance transcribed",
+                text_length=len(text),
+                audio_bytes=len(utterance.audio),
+                sample_rate=utterance.sample_rate,
+            )
+            if text:
+                yield Utterance(text, utterance.audio) if self._with_audio else text
 
+    async def _forward_stream_to_queue(self, request: SetStreamInboundDTO, queue: _TextQueue) -> None:
         try:
-            if self._with_audio:
-                assert isinstance(self._transcription, UtteranceTranscriptionPort)  # checked in __init__
-                utterances = await self._transcription.transcribe_utterances(settings, live_audio_stream())
-                async for utterance in utterances:
-                    if utterance.text:
-                        logger.info("Queued shared transcription", text_length=len(utterance.text), audio_bytes=len(utterance.audio))
-                        await queue.put(utterance)
-            else:
-                text_stream = await self._transcription.transcribe_stream(settings, live_audio_stream())
-                async for text in text_stream:
-                    if text:
-                        logger.info("Queued shared transcription", text_length=len(text))
-                        await queue.put(text)
+            async for item in self._transcribed(request.utterances):
+                await queue.put(item)
         except asyncio.CancelledError:
             logger.info("Shared stream forwarding task cancelled")
             raise

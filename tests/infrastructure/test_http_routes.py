@@ -8,9 +8,9 @@ from fastapi import FastAPI
 from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.errors import NoActiveStream
-from domain.errors import InvalidStreamSettings
+from domain.errors import InvalidAudioUtterance
 from infrastructure.inbound.http.http_handler import SttHandler
-from tests.infrastructure.test_http_handler import FakeService
+from tests.infrastructure.test_http_handler import NDJSON, FakeService, upload_body
 
 
 def _call(service: FakeService, method: str, path: str, **kwargs) -> httpx.Response:
@@ -81,25 +81,21 @@ def test_batch_failure_is_a_500_envelope():
     assert response.json()["message"] == "Failed to process batch: engine offline"
 
 
-def test_invalid_stream_settings_are_a_422_envelope_not_a_crash():
+def test_an_invalid_utterance_is_a_422_envelope_not_a_crash():
     class Rejecting(FakeService):
         async def process_stream(self, request):
-            raise InvalidStreamSettings("sample_rate and chunk_size must be positive")
+            raise InvalidAudioUtterance("sample_rate must be positive")
 
-    response = _call(Rejecting(), "POST", "/process/stream?chunk_size=0", content=b"ab")
+    response = _call(
+        Rejecting(), "POST", "/process/stream", content=upload_body(b"ab"), headers=NDJSON
+    )
 
     assert response.status_code == 422
     assert "must be positive" in response.json()["message"]
 
 
-def test_ndjson_set_stream_with_invalid_settings_is_rejected_up_front():
-    response = _call(
-        FakeService(),
-        "POST",
-        "/process/stream/set?chunk_size=0",
-        content=b"{}\n",
-        headers={"Content-Type": "application/x-ndjson"},
-    )
+def test_a_body_that_is_not_ndjson_is_rejected_up_front_with_a_415():
+    response = _call(FakeService(), "POST", "/process/stream/set", content=b"raw pcm")
 
-    assert response.status_code == 422
+    assert response.status_code == 415
     assert response.json()["action"] == "set_stream"

@@ -1,15 +1,11 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from application.dtos.completed_audio_segment import CompletedAudioSegment
+from domain.value_objects.audio_utterance import AudioUtterance
 
 
 @dataclass(slots=True, frozen=True)
 class SetStreamInboundDTO:
-    """Feeds the shared stream; the audio may contain already-delimited utterances."""
+    """Feeds the shared stream with finished utterances, each transcribed as one batch."""
 
-    audio_stream: AsyncIterator[bytes | CompletedAudioSegment]
-    sample_rate: int = 16000
-    chunk_size: int = 1024
-    silence_threshold: int = 150
-    silence_limit_seconds: float = 2.0
+    utterances: AsyncIterator[AudioUtterance]

@@ -1,6 +1,6 @@
 """STT's stream directions against the project contracts, built and decoded with the codec.
 
-Inbound  : what Brain sends (STT inbound contract) must be accepted and become audio.
+Inbound  : what Brain sends (STT inbound contract) must be accepted and become utterances.
 Outbound : what STT sends (STT outbound contract) must decode, as SSE and as NDJSON.
 """
 
@@ -12,22 +12,21 @@ from contracts.stream.codec import EventSequencer, NdjsonDecoder, SseDecoder, en
 from contracts.stream.common.base import EventType
 from contracts.stream.common.error import ErrorEvent, ErrorEventDTO
 from contracts.stream.common.heartbeat import HeartbeatEvent
-from contracts.stream.microservices.stt.inbound.stream_started import (
-    STTStreamStartedInboundEvent,
-    STTStreamStartedInboundEventDTO,
-)
 from contracts.stream.microservices.stt.inbound.completed import (
     STTCompletedInboundEvent,
     STTCompletedInboundEventDTO,
 )
-from contracts.stream.microservices.stt.inbound.partial import (
-    STTPartialInboundEvent,
-    STTPartialInboundEventDTO,
+from contracts.stream.microservices.stt.inbound.stream_started import (
+    STTStreamStartedInboundEvent,
+    STTStreamStartedInboundEventDTO,
+)
+from contracts.stream.microservices.stt.inbound.utterance import (
+    STTUtteranceInboundEvent,
+    STTUtteranceInboundEventDTO,
 )
 from contracts.stream.schemas import STT_OUTBOUND
 
-from application.dtos.completed_audio_segment import CompletedAudioSegment
-from domain.value_objects.stream_settings import StreamSettings
+from domain.value_objects.audio_utterance import AudioUtterance
 from tests.infrastructure.test_http_handler import FakeService, RecordingSetService, _build_app
 
 NDJSON = {"Content-Type": "application/x-ndjson"}
@@ -37,11 +36,12 @@ def _b64(audio: bytes) -> str:
     return base64.b64encode(audio).decode("ascii")
 
 
-def _brain_upload(*items: tuple) -> bytes:
+def _brain_upload(*items: tuple, sample_rate: int = 16000, channels: int = 1) -> bytes:
     """An upload as Brain builds it: stream_started first, then the given (class, payload) pairs."""
     sequence = EventSequencer()
     started = sequence.next(
-        STTStreamStartedInboundEvent, STTStreamStartedInboundEventDTO(sample_rate=16000, channels=1)
+        STTStreamStartedInboundEvent,
+        STTStreamStartedInboundEventDTO(sample_rate=sample_rate, channels=channels),
     )
     events = [started, *(sequence.next(cls, payload) for cls, payload in items)]
     return b"".join(encode_ndjson(event) for event in events)
@@ -56,45 +56,49 @@ def _post(app, path: str, **kwargs) -> httpx.Response:
     return asyncio.run(run())
 
 
-def _partial(audio: bytes) -> tuple:
-    return STTPartialInboundEvent, STTPartialInboundEventDTO(bytes_base64=_b64(audio))
+def _utterance(audio: bytes, rate: int = 16000) -> tuple:
+    return STTUtteranceInboundEvent, STTUtteranceInboundEventDTO(
+        bytes_base64=_b64(audio), sample_rate=rate
+    )
 
 
-def test_a_brain_upload_becomes_audio_and_is_acknowledged_with_contract_events():
+def test_a_brain_upload_becomes_utterances_and_is_acknowledged_with_contract_events():
     service = RecordingSetService()
     body = _brain_upload(
-        _partial(b"\x01\x02"),
+        _utterance(b"\x01\x02", 16000),
         (HeartbeatEvent, None),
-        _partial(b"\x03\x04"),
+        _utterance(b"\x03\x04", 22050),
         (STTCompletedInboundEvent, STTCompletedInboundEventDTO(output_bytes_base64="")),
     )
 
     response = _post(_build_app(service), "/process/stream/set", content=body, headers=NDJSON)
 
-    assert service.audio_chunks[:2] == [b"\x01\x02", b"\x03\x04"]
-    assert service.audio_chunks[2:], "a completed event without audio closes the utterance with silence"
+    assert service.utterances == [
+        AudioUtterance(b"\x01\x02", 16000),
+        AudioUtterance(b"\x03\x04", 22050),
+    ]  # the heartbeat and a completed event without audio are not utterances
     ack = [*SseDecoder(STT_OUTBOUND).feed(response.content)]
     assert [e.type for e in ack] == [EventType.START_STREAM, EventType.INPUT_COMPLETED]
     assert ack[-1].payload.reason == "end_of_input"
 
 
-def test_a_completed_event_with_audio_is_one_whole_utterance():
+def test_a_completed_event_with_audio_is_one_more_utterance_at_the_announced_rate():
     service = RecordingSetService()
     body = _brain_upload(
-        (STTCompletedInboundEvent, STTCompletedInboundEventDTO(output_bytes_base64=_b64(b"whole")))
+        (STTCompletedInboundEvent, STTCompletedInboundEventDTO(output_bytes_base64=_b64(b"whole"[:4]))),
+        sample_rate=8000,
     )
 
     _post(_build_app(service), "/process/stream/set", content=body, headers=NDJSON)
 
-    (segment,) = service.audio_chunks
-    assert isinstance(segment, CompletedAudioSegment) and segment.audio_data == b"whole"
+    assert service.utterances == [AudioUtterance(b"whol", 8000)]
 
 
 def test_the_ack_can_be_asked_for_as_ndjson():
     response = _post(
         _build_app(RecordingSetService()),
         "/process/stream/set",
-        content=_brain_upload(_partial(b"x")),
+        content=_brain_upload(_utterance(b"xy")),
         headers={**NDJSON, "Accept": "application/x-ndjson"},
     )
 
@@ -107,8 +111,7 @@ def test_the_ack_can_be_asked_for_as_ndjson():
 
 def test_contract_violations_in_the_upload_are_reported_as_an_error_event():
     sequence = EventSequencer()
-    # no stream_started first
-    body = encode_ndjson(sequence.next(*_partial(b"x")))
+    body = encode_ndjson(sequence.next(*_utterance(b"xy")))  # no stream_started first
 
     response = _post(_build_app(RecordingSetService()), "/process/stream/set", content=body, headers=NDJSON)
 
@@ -125,6 +128,45 @@ def test_an_upstream_error_event_is_reported_as_an_error_event():
 
     last = [*SseDecoder(STT_OUTBOUND).feed(response.content)][-1]
     assert last.type is EventType.ERROR and "mic_down: device lost" in last.payload.message
+
+
+def test_an_upload_that_is_not_mono_is_rejected_in_the_ack():
+    body = _brain_upload(_utterance(b"xy"), channels=2)
+
+    response = _post(_build_app(RecordingSetService()), "/process/stream/set", content=body, headers=NDJSON)
+
+    last = [*SseDecoder(STT_OUTBOUND).feed(response.content)][-1]
+    assert last.type is EventType.ERROR and "2 channels" in last.payload.message
+
+
+def test_half_a_sample_of_audio_is_rejected_in_the_ack():
+    body = _brain_upload(_utterance(b"xyz"))
+
+    response = _post(_build_app(RecordingSetService()), "/process/stream/set", content=body, headers=NDJSON)
+
+    last = [*SseDecoder(STT_OUTBOUND).feed(response.content)][-1]
+    assert last.type is EventType.ERROR and "whole number of samples" in last.payload.message
+
+
+def test_audio_that_is_not_base64_is_rejected_in_the_ack():
+    sequence = EventSequencer()
+    body = b"".join(
+        encode_ndjson(event)
+        for event in (
+            sequence.next(
+                STTStreamStartedInboundEvent, STTStreamStartedInboundEventDTO(sample_rate=16000, channels=1)
+            ),
+            sequence.next(
+                STTUtteranceInboundEvent,
+                STTUtteranceInboundEventDTO(bytes_base64="not base64!!", sample_rate=16000),
+            ),
+        )
+    )
+
+    response = _post(_build_app(RecordingSetService()), "/process/stream/set", content=body, headers=NDJSON)
+
+    last = [*SseDecoder(STT_OUTBOUND).feed(response.content)][-1]
+    assert last.type is EventType.ERROR and "not valid base64" in last.payload.message
 
 
 def test_transcripts_decode_with_the_stt_outbound_contract_in_both_framings():
@@ -145,36 +187,3 @@ def test_transcripts_decode_with_the_stt_outbound_contract_in_both_framings():
             "hello there",
             "second one",
         ]
-
-
-def test_an_upload_announcing_another_audio_format_is_rejected_in_the_ack():
-    sequence = EventSequencer()
-    body = b"".join(
-        encode_ndjson(e)
-        for e in (
-            sequence.next(
-                STTStreamStartedInboundEvent, STTStreamStartedInboundEventDTO(sample_rate=44100, channels=1)
-            ),
-            sequence.next(*_partial(b"x")),
-        )
-    )
-
-    response = _post(_build_app(RecordingSetService()), "/process/stream/set", content=body, headers=NDJSON)
-
-    last = [*SseDecoder(STT_OUTBOUND).feed(response.content)][-1]
-    assert last.type is EventType.ERROR and "44100" in last.payload.message and "16000" in last.payload.message
-
-
-def test_get_with_settings_that_differ_from_the_active_stream_is_a_422():
-    class WithSettings(FakeService):
-        def current_settings(self):
-            return StreamSettings(sample_rate=16000)
-
-    service = WithSettings(get_items=["x"])
-    app = _build_app(service)
-
-    mismatch = _post(app, "/process/stream/get", method="GET", params={"sample_rate": 8000})
-    same = _post(app, "/process/stream/get", method="GET", params={"sample_rate": 16000, "chunk_size": 1024})
-
-    assert mismatch.status_code == 422 and "sample_rate=8000" in mismatch.json()["message"]
-    assert same.status_code == 200

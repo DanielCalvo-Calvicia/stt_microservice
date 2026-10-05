@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 
-from domain.value_objects.stream_settings import StreamSettings
-
 from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
@@ -14,11 +12,11 @@ class SttTranscriptionPort(ABC):
 
     @abstractmethod
     async def process_stream(self, request: ProcessStreamInboundDTO) -> TextStreamOutboundDTO:
-        """Transcribe a live audio stream; the text stream yields one item per utterance."""
+        """Transcribe a live stream of utterances; the text stream yields one item per utterance."""
 
     @abstractmethod
     async def set_stream(self, request: SetStreamInboundDTO) -> None:
-        """Feed the shared stream and return when its audio has ended.
+        """Feed the shared stream and return when its utterances have ended.
 
         A new call replaces the previous one. Read the text with ``get_stream``.
         """
@@ -26,10 +24,6 @@ class SttTranscriptionPort(ABC):
     @abstractmethod
     async def get_stream(self) -> TextStreamOutboundDTO:
         """The shared text stream. Raises NoActiveStream if ``set_stream`` was never called."""
-
-    def current_settings(self) -> StreamSettings | None:
-        """The settings the shared stream was set with, or None before any ``set_stream``."""
-        return None
 
     @abstractmethod
     async def stop_stream(self) -> None:

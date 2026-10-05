@@ -1,13 +1,11 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from domain.value_objects.audio_utterance import AudioUtterance
+
 
 @dataclass(slots=True, frozen=True)
 class ProcessStreamInboundDTO:
-    """Carries a live audio stream, and how to split it into utterances, into the application."""
+    """Carries a live stream of finished utterances (the microphone already cut them) into the application."""
 
-    audio_stream: AsyncIterator[bytes]
-    sample_rate: int = 16000
-    chunk_size: int = 1024
-    silence_threshold: int = 150
-    silence_limit_seconds: float = 2.0
+    utterances: AsyncIterator[AudioUtterance]

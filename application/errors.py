@@ -17,5 +17,5 @@ class EngineNotConfigured(ApplicationError, RuntimeError):
     """The selected transcription engine is missing a required setting (e.g. an API key)."""
 
 
-class StreamSettingsMismatch(ApplicationError, ValueError):
-    """A request names stream settings that differ from the ones the active stream was set with."""
+class UnsupportedInput(ApplicationError, ValueError):
+    """The request body is not in a form STT takes (it takes NDJSON events of the STT inbound contract)."""
