@@ -40,3 +40,14 @@ def test_stt_config_normalises_values():
 def test_blank_language_falls_back():
     cfg = SttConfig.from_env({"STT_LANGUAGE": "   "})
     assert cfg.language == "en"
+
+
+def test_gate_settings_default_to_off_with_the_tiny_model_and_the_phrase_as_prompt():
+    cfg = SttConfig.from_env({})
+    assert (cfg.gate_enabled, cfg.gate_model, cfg.gate_prompt) == (False, "tiny.en", "Oblivion 306")
+
+
+def test_gate_settings_are_read_from_the_environment():
+    cfg = SttConfig.from_env({"STT_GATE_ENABLED": "TRUE", "STT_GATE_MODEL": " base.en ", "STT_GATE_PROMPT": "Robot 7"})
+    assert (cfg.gate_enabled, cfg.gate_model, cfg.gate_prompt) == (True, "base.en", "Robot 7")
+    assert SttConfig.from_env({"STT_GATE_ENABLED": "no"}).gate_enabled is False

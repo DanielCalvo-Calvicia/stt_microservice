@@ -19,6 +19,9 @@ python main.py
 | `LOG_LEVEL` | `INFO` | Read by the shared logging module (`TRACE`, `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`, `CRITICAL`) |
 | `STT_ENGINE` | `openai` | `openai` = Whisper API (`whisper-1`); any other value (e.g. `local`) = local faster-whisper (`small.en`, CPU, int8). Case-insensitive |
 | `STT_LANGUAGE` | `en` | ISO-639-1 code forced on the transcription (empty falls back to `en`) |
+| `STT_GATE_ENABLED` | `0` | `1` = also run the wake-phrase gate: a second, local engine under `/gate/...` (see below) |
+| `STT_GATE_MODEL` | `tiny.en` | faster-whisper model of the gate (small and fast, run with greedy decoding) |
+| `STT_GATE_PROMPT` | `Oblivion 306` | Hint given to the gate engine so it spells the wake phrase right (empty = none) |
 | `OPENAI_API_KEY` | *(empty)* | Required when `STT_ENGINE=openai`; startup fails with `EngineNotConfigured` without it. Never log or echo it |
 
 `LOG_FORMAT`, `LOG_OUTPUT`, `ENVIRONMENT` and `TRACE_EXPORT_*` are also read by the shared logging package, not by this service: see [`shared-logging/docs/logging.md`](../shared-logging/docs/logging.md). The table equals `.env.example` and `ServerConfig`/`SttConfig` in `infrastructure/config/`. The engine model names are constants, not settings.
@@ -34,6 +37,7 @@ python main.py
 | GET | `/process/stream/get` | Reads the shared stream's text events (`STT_OUTBOUND`): SSE by default, NDJSON with `Accept: application/x-ndjson`; a `heartbeat` every 15 s when idle. 404 if nothing was set |
 | POST | `/stop` | Stops the shared stream |
 | POST | `/process/batch?sample_rate=16000` | Body is one PCM buffer; `data` is `STTProcessBatchResponse{text}`. 400 if the body is empty |
+| POST/GET | `/gate/process/stream/set`, `/gate/process/stream/get` (only with `STT_GATE_ENABLED=1`) | Same as the stream routes, on the gate's own shared stream and local engine. Each `completed` event also carries the utterance's audio in `audio_base64` (PCM16 mono), so Brain can send it to the real engine when the wake phrase was heard. `/gate/available` and `/available` report the gate too |
 
 Stream endpoints take `sample_rate` (16000), `chunk_size` (1024), `silence_threshold` (150) and `silence_limit_seconds` (2.0) as query parameters. Utterances end after `silence_limit_seconds` of silence. On `/process/stream/get` the same names may be repeated but must match the stream that `set` fixed (else 422).
 

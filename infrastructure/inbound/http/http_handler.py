@@ -60,25 +60,43 @@ async def _request_body_chunks(request: Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
+GATE_PREFIX = "/gate"
+
+
 class SttHandler:
-    def __init__(self, port: SttTranscriptionPort) -> None:
+    """The STT routes. The main handler has all of them; the wake-phrase gate has its own, under ``/gate``, with only
+    the shared stream (``set``/``get``), ``available`` and ``stop``, and its ``completed`` events carry the audio."""
+
+    def __init__(
+        self,
+        port: SttTranscriptionPort,
+        *,
+        prefix: str = "",
+        include_audio: bool = False,
+        gate: SttTranscriptionPort | None = None,
+    ) -> None:
         self._port = port
+        self._include_audio = include_audio
+        self._gate = gate  # when the service also runs the gate, /available reports both
         self.router = APIRouter()
         add = self.router.add_api_route
-        add("/health", self.handle_health, methods=["GET"], tags=["Health"])
-        add("/available", self.handle_available, methods=["GET"])
-        add("/stop", self.handle_stop, methods=["POST"])
-        add("/process/stream", self.handle_process_stream, methods=["POST"], response_model=None)
-        add("/process/stream/set", self.handle_set_stream, methods=["POST"], response_model=None)
-        add("/process/stream/get", self.handle_get_stream, methods=["GET"], response_model=None)
-        add("/process/batch", self.handle_process_batch, methods=["POST"])
+        if not prefix:
+            add("/health", self.handle_health, methods=["GET"], tags=["Health"])
+        add(f"{prefix}/available", self.handle_available, methods=["GET"])
+        add(f"{prefix}/stop", self.handle_stop, methods=["POST"])
+        if not prefix:
+            add("/process/stream", self.handle_process_stream, methods=["POST"], response_model=None)
+        add(f"{prefix}/process/stream/set", self.handle_set_stream, methods=["POST"], response_model=None)
+        add(f"{prefix}/process/stream/get", self.handle_get_stream, methods=["GET"], response_model=None)
+        if not prefix:
+            add("/process/batch", self.handle_process_batch, methods=["POST"])
 
     async def handle_health(self) -> JSONResponse:
         return success("health_check", "Service is healthy", HealthCheckResponse(healthy=True))
 
     async def handle_available(self) -> JSONResponse:
         try:
-            available = self._port.is_available()
+            available = self._port.is_available() and (self._gate is None or self._gate.is_available())
         except Exception as error:
             return failure("check_availability", "Failed to check availability", error)
         return success(
@@ -200,6 +218,7 @@ class SttHandler:
                 formatter=formatter,
                 emit_empty_completion_on_end=False,
                 heartbeat_interval_seconds=_GET_HEARTBEAT_SECONDS,
+                include_audio=self._include_audio,
             ),
             media_type=media_type,
             status_code=status.HTTP_200_OK,

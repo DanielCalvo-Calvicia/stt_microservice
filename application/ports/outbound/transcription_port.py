@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
 from domain.value_objects.stream_settings import StreamSettings
+from domain.value_objects.utterance import Utterance
 
 
 class TranscriptionPort(ABC):
@@ -24,3 +25,13 @@ class TranscriptionPort(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """True if the engine is loaded/configured."""
+
+
+class UtteranceTranscriptionPort(TranscriptionPort):
+    """An engine that can also hand back the audio of each utterance (the wake-phrase gate needs it)."""
+
+    @abstractmethod
+    async def transcribe_utterances(
+        self, settings: StreamSettings, audio_stream: AsyncIterator[bytes]
+    ) -> AsyncIterator[Utterance]:
+        """Like ``transcribe_stream``, but each item is an ``Utterance`` carrying the audio it was made from."""

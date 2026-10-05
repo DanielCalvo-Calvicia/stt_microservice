@@ -186,3 +186,41 @@ def test_openai_batch_calls_the_api_with_a_wav_and_cleans_up(monkeypatch):
     assert calls[0]["riff"] == b"RIFF"
     assert len(removed) == 1
     assert not os.path.exists(removed[0])
+
+
+def test_gate_stream_yields_the_utterance_audio_with_its_text_and_asks_the_model_for_the_prompt():
+    class RecordingModel(FakeLocalModel):
+        def transcribe(self, audio_data: Any, **kwargs: Any):
+            self.kwargs = kwargs
+            return super().transcribe(audio_data, **kwargs)
+
+    from domain.value_objects.utterance import Utterance
+
+    async def run() -> tuple[Any, RecordingModel]:
+        model = RecordingModel()
+        chunk = _pcm_chunk(10000)
+        stream = _LocalTextStream(
+            SETTINGS, _audio_stream([chunk]), model, "en", initial_prompt="Oblivion 306", beam_size=1, with_audio=True
+        )
+        return (await stream.__anext__(), chunk), model
+
+    (utterance, chunk), model = asyncio.run(run())
+
+    assert utterance == Utterance("final local text", chunk)
+    assert model.kwargs["initial_prompt"] == "Oblivion 306" and model.kwargs["beam_size"] == 1
+
+
+def test_a_plain_local_stream_yields_text_and_sends_no_prompt():
+    class RecordingModel(FakeLocalModel):
+        def transcribe(self, audio_data: Any, **kwargs: Any):
+            self.kwargs = kwargs
+            return super().transcribe(audio_data, **kwargs)
+
+    async def run() -> tuple[Any, RecordingModel]:
+        model = RecordingModel()
+        stream = _LocalTextStream(SETTINGS, _audio_stream([_pcm_chunk(10000)]), model, "en")
+        return await stream.__anext__(), model
+
+    text, model = asyncio.run(run())
+
+    assert text == "final local text" and "initial_prompt" not in model.kwargs and model.kwargs["beam_size"] == 5

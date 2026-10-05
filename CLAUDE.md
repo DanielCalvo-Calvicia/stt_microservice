@@ -14,6 +14,7 @@ Brain feeds it audio and reads the text back. STT segments audio by voice activi
 | `GET /process/stream/get` | Brain reads text events (SSE, or NDJSON with `Accept`); heartbeat every 15 s; 404 if nothing was set |
 | `POST /process/stream` | Single-request variant (audio in the body, answers SSE). Query: `sample_rate`, `chunk_size`, `silence_threshold`, `silence_limit_seconds` |
 | `POST /process/batch?sample_rate=` | One PCM buffer -> `data: {text}`; 400 on an empty body |
+| `/gate/process/stream/{set,get}` | Only with `STT_GATE_ENABLED=1`: the wake-phrase gate, a second local faster-whisper (`STT_GATE_MODEL`, default `tiny.en`, greedy, `STT_GATE_PROMPT` as hint) with its own shared stream. Its `completed` events carry the utterance audio in `audio_base64` (contracts 0.11.0). Brain decides from the text; the real STT only gets `/process/batch` with that audio |
 | `GET /health`, `/available`, `POST /stop` | Liveness, engine readiness, stop |
 
 Errors: 404 no stream set, 422 invalid or mismatching stream settings, else 500.
@@ -29,7 +30,7 @@ Engines: `STT_ENGINE=openai` (default, Whisper API `whisper-1`, needs `OPENAI_AP
 - Events use `contracts.stream` (`STT_INBOUND`/`STT_OUTBOUND`, `UPLOAD_ACK`) and the shared codec. Never hand-write event JSON.
 - The old autoloader (direct pull from another service's stream) was removed on purpose (archived in `docs/old/autoloader/`). Do not reintroduce direct service-to-service calls. Brain coordinates.
 - Never log or echo `OPENAI_API_KEY`. Do not open `.env`.
-- `contracts` comes from `vendor/contracts_microservice-<version>.whl` (0.10.0); refresh it with `contracts/scripts/bundle.py`.
+- `contracts` comes from `vendor/contracts_microservice-<version>.whl` (0.11.0); refresh it with `contracts/scripts/bundle.py`.
 - Ruff/mypy/black are configured in `pyproject.toml` but not installed in this venv. Install them first if you need them, and do not bulk-fix lint unasked.
 - `.engram/` holds old notes. Do not trust it over the code.
 

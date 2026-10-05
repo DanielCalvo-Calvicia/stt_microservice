@@ -12,10 +12,11 @@ import numpy as np
 from faster_whisper import WhisperModel
 from shared_logging import get_logger
 
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.transcription_port import UtteranceTranscriptionPort
 from domain.operations.pcm import PcmChunkAligner
 from domain.operations.silence import silence_limit_chunks
 from domain.value_objects.stream_settings import StreamSettings
+from domain.value_objects.utterance import Utterance
 
 logger = get_logger(__name__)
 
@@ -50,12 +51,19 @@ class _LocalTextStream(AsyncIterator[str]):
         audio_stream: AsyncIterator[bytes],
         model: Any,  # noqa: ANN401 - faster_whisper is untyped
         language: str,
+        *,
+        initial_prompt: str | None = None,
+        beam_size: int = 5,
+        with_audio: bool = False,
     ) -> None:
         self._settings = settings
         self._audio_stream = audio_stream
         self._model = model
         self._language = language
-        logger.info("Local text stream initialized", settings=settings, language=language)
+        self._initial_prompt = initial_prompt
+        self._beam_size = beam_size
+        self._with_audio = with_audio  # yield Utterance(text, audio) instead of the bare text
+        logger.info("Local text stream initialized", settings=settings, language=language, with_audio=with_audio)
 
         self._audio_buffer = bytearray()
         self._silent_chunks = 0
@@ -68,7 +76,7 @@ class _LocalTextStream(AsyncIterator[str]):
     def __aiter__(self) -> "_LocalTextStream":
         return self
 
-    async def __anext__(self) -> str:
+    async def __anext__(self) -> str | Utterance:
         while True:
             utterance = await self._transcription_queue.get()
             if utterance is None:
@@ -81,7 +89,7 @@ class _LocalTextStream(AsyncIterator[str]):
 
             if text.strip():
                 logger.info("Local transcription", text_length=len(text.strip()))
-                return text.strip()
+                return Utterance(text.strip(), bytes(utterance)) if self._with_audio else text.strip()
             logger.info("Local text stream discarded empty transcription")
 
     async def _continuous_vad(self) -> None:
@@ -146,13 +154,15 @@ class _LocalTextStream(AsyncIterator[str]):
 
     def _transcribe_sync(self, audio_buffer: bytearray) -> str:
         audio_data = _pcm_to_whisper_input(bytes(audio_buffer), self._settings.sample_rate)
-        segments, _info = self._model.transcribe(
-            audio_data,
-            beam_size=5,
-            language=self._language,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.65,
-        )
+        options: dict[str, Any] = {
+            "beam_size": self._beam_size,
+            "language": self._language,
+            "condition_on_previous_text": False,
+            "no_speech_threshold": 0.65,
+        }
+        if self._initial_prompt:
+            options["initial_prompt"] = self._initial_prompt  # biases the model toward words it is likely to hear
+        segments, _info = self._model.transcribe(audio_data, **options)
         text_output = ""
         for segment in segments:
             if segment.text.strip():
@@ -160,9 +170,18 @@ class _LocalTextStream(AsyncIterator[str]):
         return text_output
 
 
-class LocalWhisperTranscription(TranscriptionPort):
-    def __init__(self, language: str = "en", model_name: str = DEFAULT_MODEL_NAME) -> None:
+class LocalWhisperTranscription(UtteranceTranscriptionPort):
+    def __init__(
+        self,
+        language: str = "en",
+        model_name: str = DEFAULT_MODEL_NAME,
+        *,
+        initial_prompt: str | None = None,
+        beam_size: int = 5,
+    ) -> None:
         self._language = language or "en"
+        self._initial_prompt = initial_prompt
+        self._beam_size = beam_size
         logger.info(
             "Loading local Whisper model on CPU with int8 compute",
             model_name=model_name,
@@ -177,7 +196,18 @@ class LocalWhisperTranscription(TranscriptionPort):
     async def transcribe_stream(
         self, settings: StreamSettings, audio_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[str]:
-        return _LocalTextStream(settings, audio_stream, self._model, self._language)
+        return _LocalTextStream(  # type: ignore[return-value]  # yields str unless with_audio
+            settings, audio_stream, self._model, self._language,
+            initial_prompt=self._initial_prompt, beam_size=self._beam_size,
+        )
+
+    async def transcribe_utterances(
+        self, settings: StreamSettings, audio_stream: AsyncIterator[bytes]
+    ) -> AsyncIterator[Utterance]:
+        return _LocalTextStream(  # type: ignore[return-value]  # yields Utterance because with_audio
+            settings, audio_stream, self._model, self._language,
+            initial_prompt=self._initial_prompt, beam_size=self._beam_size, with_audio=True,
+        )
 
     async def transcribe_batch(self, audio_data: bytes, sample_rate: int) -> str:
         samples = _pcm_to_whisper_input(audio_data, sample_rate)

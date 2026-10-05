@@ -201,7 +201,7 @@ def test_process_stream_emits_no_chunks_when_no_text_is_parsed() -> None:
 
     _assert_event_shape(events[0], "stream_started", 1)
     _assert_event_shape(events[1], "completed", 2)
-    assert events[1]["payload"] == {"reason": "completed", "output": ""}
+    assert events[1]["payload"] == {"reason": "completed", "output": "", "audio_base64": ""}
 
 
 def test_process_stream_ignores_empty_adapter_text_chunks() -> None:
@@ -221,7 +221,7 @@ def test_process_stream_emits_partial_and_completed_events() -> None:
     _assert_event_shape(events[1], "partial", 2)
     assert events[1]["payload"] == {"text": "hello world"}
     _assert_event_shape(events[2], "completed", 3)
-    assert events[2]["payload"] == {"reason": "completed", "output": "hello world"}
+    assert events[2]["payload"] == {"reason": "completed", "output": "hello world", "audio_base64": ""}
 
 
 def test_stream_can_continue_after_completed_event() -> None:
@@ -403,7 +403,7 @@ def test_decoupled_stream_returns_text_from_outbound_adapter_to_get_stream() -> 
 
     assert [event["type"] for event in events] == ["stream_started", "partial", "completed"]
     assert events[1]["payload"] == {"text": "adapter text"}
-    assert events[2]["payload"] == {"reason": "completed", "output": "adapter text"}
+    assert events[2]["payload"] == {"reason": "completed", "output": "adapter text", "audio_base64": ""}
 
 
 def test_decoupled_get_receives_adapter_text_while_set_connection_is_open() -> None:

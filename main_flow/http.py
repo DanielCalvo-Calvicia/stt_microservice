@@ -45,8 +45,11 @@ async def run_http() -> None:
 
 async def _cleanup(container: HttpContainer) -> None:
     logger.info("Server stopped; stopping the shared stream")
-    try:
-        await container.stt.stop_stream()
-    except Exception:
-        logger.exception("Failed to stop the shared stream during cleanup")
+    for name, service in (("shared", container.stt), ("gate", container.gate)):
+        if service is None:
+            continue
+        try:
+            await service.stop_stream()
+        except Exception:
+            logger.exception("Failed to stop a shared stream during cleanup", stream=name)
     logger.info("Cleanup finished")
