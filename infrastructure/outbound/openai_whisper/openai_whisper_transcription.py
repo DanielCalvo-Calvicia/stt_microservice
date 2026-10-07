@@ -8,6 +8,7 @@ import asyncio
 import os
 import tempfile
 import wave
+from typing import Any
 
 from openai import OpenAI
 from shared_logging import get_logger
@@ -48,7 +49,7 @@ def _call_whisper_api(client: OpenAI, wav_path: str, language: str, prompt: str 
         language=language,
         prompted=bool(prompt),
     )
-    options: dict[str, object] = {}
+    options: dict[str, Any] = {}
     if prompt:
         options["prompt"] = prompt  # words the model should spell the way they are written here
     with open(wav_path, "rb") as audio_file:
