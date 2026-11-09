@@ -19,3 +19,12 @@ class EngineNotConfigured(ApplicationError, RuntimeError):
 
 class UnsupportedInput(ApplicationError, ValueError):
     """The request body is not in a form STT takes (it takes NDJSON events of the STT inbound contract)."""
+
+
+class TranscriptionFailed(ApplicationError):
+    """An engine could not transcribe an utterance.
+
+    The message is fixed text that is safe to return to a caller and to log: it never holds the
+    text of the underlying library, which can echo part of a secret (a wrong OpenAI key comes
+    back in a 401 message).
+    """

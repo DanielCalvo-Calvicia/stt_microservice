@@ -18,9 +18,9 @@ Only what can be verified in the repository. Labels: **Implemented** (in the cod
 ## Secrets
 
 - **Required:** `OPENAI_API_KEY` is the only secret. It lives in the `.env` file or the environment, never in the code, `.env.example`, a test or a document. In a deployment the deploy tool writes it from `config/local/` (its own repo).
-- **Implemented:** `.env` is ignored by git; `.env.example` holds names only. The key is held in the OpenAI engine object and passed to the client; the service never logs or returns it. The start fails without it (`EngineNotConfigured`) rather than running with an empty key.
-- **Not verified:** that a failure text from the OpenAI library never contains part of a key; the service returns `str(error)` in the failure envelope and logs it (`Operation failed`). Do not rely on it being clean.
-- **Configured (deployment repo):** in Docker the `.env` is excluded from the build context and bind-mounted read-only, never an image layer. `docker history` / `docker inspect` were not checked.
+- **Implemented:** `.env` is ignored by git; `.env.example` holds names only. The key is held in the OpenAI engine object and passed to the client; the service does not log or return it on a normal run (two real runs on 2026-11-06 held none). The start fails without it (`EngineNotConfigured`) rather than running with an empty key.
+- **Implemented (T-01.7, 2026-11-06):** a failure of the OpenAI call reaches the caller (the `500` answer), the stream's `error` event and the log only as the fixed message `OpenAI request failed: <ErrorType> (HTTP <status>)`, never the library's text; tested with an obviously fake key. History: until then a wrong key came back as the library's `Incorrect API key provided: <first 8 characters>***...<last 4 characters>` in the answer and in the `Operation failed` log line (verified 2026-11-06 in T-01.1.5 drill 5). `/available` still says available with a wrong key (it never calls the API), as documented. The local engine's errors are still the library's text; no secret was found in them.
+- **Configured (deployment repo):** in Docker the `.env` is excluded from the build context and bind-mounted read-only, never an image layer. Checked on 2026-11-09 (T-03.4, amd64): 0 matches for `OPENAI_API_KEY` or `sk-` in `docker history`, `docker image inspect`, the running container's `inspect` and the saved layers; the only `.env` entry in the image is `.env.example`; the container's mounts are the `.env` read-only and the models volume. **The container runs as root** (the generic Dockerfile of `deployment` sets no user) and the image holds `docs/`, `tests/` and `CLAUDE.md`: open findings for the `deployment` repository.
 
 ## Data handling
 
@@ -31,10 +31,10 @@ Only what can be verified in the repository. Labels: **Implemented** (in the cod
 
 ## Supply chain
 
-- **Not implemented:** version pins (`>=` only), a lock file, dependency scanning. `contracts` comes from a wheel bundled in `vendor/` (reviewed when it is refreshed with `contracts/scripts/bundle.py`).
-- **Known debt:** pytest, ruff, black and mypy are in the runtime requirement files and so are installed in the deployed image (a larger attack surface than needed).
+- **Implemented (T-01.6, 2026-11-08):** the seven packages the service imports are pinned to exact versions in `requirements.windows.txt` and `requirements.linux.txt`: the ones the engines ran with on 2026-11-06. The `numpy` line has a Python 3.11 fallback that is still an open bound (numpy 2.5.4 has no 3.11 build). **Not implemented:** a lock file (the dependencies of those packages are not pinned), dependency scanning. `contracts` comes from a wheel bundled in `vendor/` (reviewed when it is refreshed with `contracts/scripts/bundle.py`).
+- **Implemented (T-01.4, 2026-11-08):** pytest, ruff, black, mypy and httpx are in `requirements.dev.txt`, which the deploy tool never installs, so a new deploy does not carry them (a venv built earlier keeps them until it is rebuilt).
 - The local models are downloaded from the Hugging Face hub with no checksum check by this service.
 
 ## Recommended, not implemented
 
-Authentication shared by the workspace (when it is designed), a request size limit, a timeout and a retry policy for the OpenAI call, a private temp folder, pinned dependencies, moving the dev tools out of the runtime requirements (also in the architecture document, *Known debt*).
+Authentication shared by the workspace (when it is designed), a request size limit, a timeout and a retry policy for the OpenAI call, a private temp folder, a lock file for the packages the pinned ones depend on (also in the architecture document, *Known debt*).

@@ -40,3 +40,59 @@ def test_any_other_engine_name_selects_the_local_engine(monkeypatch):
 
     assert loaded == ["small.en"]
     assert container.stt.is_available() is True
+
+
+def test_the_local_settings_reach_the_main_model_and_the_gate(monkeypatch):
+    built: list[tuple[str, dict[str, object]]] = []
+
+    class FakeWhisperModel:
+        def __init__(self, name: str, **kwargs: object) -> None:
+            built.append((name, kwargs))
+
+    monkeypatch.setattr(
+        "infrastructure.outbound.local_whisper.local_whisper_transcription.WhisperModel",
+        FakeWhisperModel,
+    )
+
+    http_container.new_http_container(
+        ServerConfig.from_env({}),
+        SttConfig.from_env(
+            {
+                "STT_ENGINE": "local",
+                "STT_MODEL": "small",
+                "STT_THREADS": "4",
+                "STT_COMPUTE_TYPE": "float32",
+                "STT_GATE_ENABLED": "1",
+                "STT_GATE_MODEL": "base.en",
+            }
+        ),
+    )
+
+    # the main model and the gate: their own model names, the threads and the compute type shared
+    assert built == [
+        ("small", {"device": "cpu", "compute_type": "float32", "cpu_threads": 4}),
+        ("base.en", {"device": "cpu", "compute_type": "float32", "cpu_threads": 4}),
+    ]
+
+
+def test_with_no_local_setting_the_main_model_and_the_gate_are_built_as_before(monkeypatch):
+    built: list[tuple[str, dict[str, object]]] = []
+
+    class FakeWhisperModel:
+        def __init__(self, name: str, **kwargs: object) -> None:
+            built.append((name, kwargs))
+
+    monkeypatch.setattr(
+        "infrastructure.outbound.local_whisper.local_whisper_transcription.WhisperModel",
+        FakeWhisperModel,
+    )
+
+    http_container.new_http_container(
+        ServerConfig.from_env({}),
+        SttConfig.from_env({"STT_ENGINE": "local", "STT_GATE_ENABLED": "1"}),
+    )
+
+    assert built == [
+        ("small.en", {"device": "cpu", "compute_type": "int8", "cpu_threads": 2}),
+        ("base", {"device": "cpu", "compute_type": "int8", "cpu_threads": 2}),
+    ]

@@ -74,7 +74,7 @@ SSE by default; NDJSON with `Accept: application/x-ndjson`. `input_completed` is
 
 ## Batch: `POST /process/batch?sample_rate=16000`
 
-The body is one raw PCM buffer (no JSON). `sample_rate` defaults to `16000`. The answer is the envelope with `data` = `STTProcessBatchResponse{text}`. An empty body is `400` "No audio data provided". The text is returned as the engine produced it (the stream routes also strip it).
+The body is one raw PCM buffer (no JSON). `sample_rate` defaults to `16000`. The answer is the envelope with `data` = `STTProcessBatchResponse{text}`. An empty body is `400` "No audio data provided". The text is returned as the engine produced it (the stream routes also strip it). Checked on 2026-11-06: the local engine's batch text starts with a space (Whisper's own), the OpenAI engine's does not, so a caller that compares texts must strip.
 
 ## Envelope
 
@@ -96,7 +96,7 @@ The mapping is in `infrastructure/inbound/http/http_error_mapper.py`.
 | 404 | `GET /process/stream/get` before any `set`; any `/gate/...` path with the gate off |
 | 415 | `set` or `POST /process/stream` with a `Content-Type` that is not NDJSON |
 | 422 | An invalid utterance (non-positive sample rate, half a sample) raised **before** the stream starts |
-| 500 | Anything else: an engine failure in `/process/batch`, `/available` or `/stop`, an unexpected error |
+| 500 | Anything else: an engine failure in `/process/batch`, `/available` or `/stop`, an unexpected error. A failure of the OpenAI call has the fixed message `OpenAI request failed: <ErrorType> (HTTP <status>)` (for example `AuthenticationError (HTTP 401)` for a wrong key), never the library's text |
 
 Once a stream answer has started (status `200` already sent) a failure cannot change the status: it is an `error` event (`stream_failed`) and the answer ends. This is why a bad utterance inside `set` or `POST /process/stream` shows as an `error` event (in `get` or in that answer) and not as a `422` in practice; the `422` exists for a failure raised before the first event (covered by a test that makes the port raise it).
 

@@ -16,3 +16,5 @@ The first version caught every exception and answered `500`; an empty batch body
 - A caller can tell "nothing was set" (`404`) from "your body is wrong" (`415`) from "the engine failed" (`500`).
 - The `422` is reachable only for a failure raised before the first event; in practice a bad utterance inside a stream shows as an `error` event ([api](../api/api.md)).
 - The failure text goes back to the caller as the exception message: it is not sanitised ([security](../security/security.md)).
+
+> **Update 2026-11-06 (T-01.7):** the last consequence changed for the OpenAI engine. Its failures are now `TranscriptionFailed` with a fixed message (`OpenAI request failed: <ErrorType> (HTTP <status>)`), so the failure text that goes back to the caller and to the log is no longer the library's text; a wrong key used to come back with its first 8 and last 4 characters (found in T-01.1.5). The status stays `500`. The local engine's failures are still the exception text.

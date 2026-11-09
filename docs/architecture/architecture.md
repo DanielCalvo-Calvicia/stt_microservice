@@ -1,6 +1,6 @@
 # Architecture
 
-Sections marked **(exists)** were verified in the repository on 2026-11-05 (branch `feature_ai_claude_2`, commit `853d1bf`). Sections marked **(planned)** come from recommendations or decisions and are not implemented. History that no longer describes the code is at the end (section 9) and in `docs/old/`.
+Sections marked **(exists)** were verified in the repository on 2026-11-08 (branch `feature_ai_claude_2`, HEAD `bcd76a0` plus the uncommitted work of the deployment plan, `docs/tasks`). Sections marked **(planned)** come from recommendations or decisions and are not implemented. History that no longer describes the code is at the end (section 9) and in `docs/old/`.
 
 ## 1. Purpose and responsibility (exists)
 
@@ -56,7 +56,7 @@ domain/
   value_objects/audio_utterance.py         AudioUtterance(audio, sample_rate)
   value_objects/utterance.py               Utterance(text, audio): what the gate's stream yields
 application/
-  errors.py                                ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured, UnsupportedInput
+  errors.py                                ApplicationError, NoActiveStream, SharedStreamForwardingError, EngineNotConfigured, UnsupportedInput, TranscriptionFailed
   dtos/                                    ProcessStreamInboundDTO, SetStreamInboundDTO, ProcessBatchInboundDTO,
                                            TextStreamOutboundDTO, BatchTranscriptionOutboundDTO
   ports/inbound/stt_transcription_port.py  SttTranscriptionPort (driving)
@@ -75,9 +75,11 @@ infrastructure/
 composition_root/
   dependencies/stt_dependencies.py         new_transcription / new_gate_transcription / new_stt_service / new_http_app
   containers/http_container.py             HttpContainer(app, stt, gate), new_http_container
-scripts/fetch_gate_model.py                downloads the gate model (deploy `prepare` step)
-tests/                                     domain/ application/ infrastructure/ composition_root/ architecture/ (pytest, 90) + simple.py (end to end)
-vendor/                                    the bundled contracts wheel (0.15.0)
+scripts/fetch_gate_model.py                downloads the local models the settings need: main and/or gate (deploy `prepare` step)
+tests/                                     domain/ application/ infrastructure/ composition_root/ architecture/ scripts/ (pytest, 140) + simple.py (end to end)
+vendor/                                    the bundled contracts wheel (0.15.0 committed; 0.16.0 in the maintainer's working tree)
+requirements.windows.txt, requirements.linux.txt   what the service runs on (the deploy tool installs them)
+requirements.dev.txt                       pytest, httpx, ruff, black, mypy (the deploy tool never installs it)
 ```
 
 ## 4. Execution flow (exists)
@@ -105,25 +107,28 @@ Text and audio events are the `contracts.stream` events `STT_INBOUND`, `STT_OUTB
 | [ADR-005](../decisions/ADR-005-wake-phrase-gate.md) | The wake-phrase gate is a second service instance with a local engine, under `/gate` (2026-10-05) |
 | [ADR-006](../decisions/ADR-006-no-direct-service-calls.md) | No autoloader: STT never pulls a stream from another service; Brain coordinates (2026-09-20) |
 | [ADR-007](../decisions/ADR-007-http-status-mapping.md) | Natural HTTP statuses by exception type; a failure inside a started stream is an `error` event |
+| [ADR-008](../decisions/ADR-008-local-model-settings.md) | `STT_MODEL`, `STT_THREADS` and `STT_COMPUTE_TYPE` are settings; threads and compute type are shared by the main model and the gate (2026-11-06; built in T-01.2.2 and T-01.2.3) |
+| [ADR-009](../decisions/ADR-009-model-delivery-in-docker.md) | In Docker the local models live in the named volume `oblivion-stt-models` and the `prepare` step runs against the real settings before the service starts (2026-11-06, not built) |
 
 ## 7. Persistence, errors, startup (exists)
 
 - **Persistence:** none. The shared stream is an in-memory queue; nothing survives a restart. The only files are the OpenAI engine's temporary WAV per utterance and the models' cache ([monitoring.md](../operations/monitoring.md)).
-- **Error handling:** sentinel errors per layer (`domain/errors.py`, `application/errors.py`); `map_error` turns them into statuses; the engines raise whatever their library raises, which becomes a `500`.
-- **Start-up/shutdown:** fails fast on a missing key or an unloadable model; graceful stop of both shared streams.
+- **Error handling:** sentinel errors per layer (`domain/errors.py`, `application/errors.py`); `map_error` turns them into statuses; the local engine raises whatever its library raises and the OpenAI engine raises `TranscriptionFailed` with a fixed message (T-01.7); either becomes a `500`.
+- **Start-up/shutdown:** fails fast on a missing key, a bad `SERVICE_PORT` or `STT_THREADS`, or an unloadable model (see "What a failed start looks like" in [deployment.md](../deployment/deployment.md)); graceful stop of both shared streams.
 - **Concurrency:** one event loop. The local engine runs in `asyncio.to_thread`; the OpenAI call too. A `set` transcribes its utterances one after another; the batch route, the gate and the main stream run independently of each other.
 
 ## 8. Known debt (exists as debt; each is also in the README)
 
-1. **Model, compute type and threads of the local engine are constants** (`small.en`, `int8`, 2 threads). `STT_LANGUAGE=es` cannot work with the local engine. Planned: `STT_MODEL`, `STT_THREADS`, `STT_COMPUTE_TYPE` ([audit](../deployment_audit/stt.md)).
-2. **Dev tools in the runtime requirements:** pytest, ruff, black and mypy are in `requirements.windows.txt` and `requirements.linux.txt`, so the deploy image installs them. Planned: a `requirements.dev.txt`.
-3. **The model cache is not persistent in Docker**, and the deploy `prepare` step fetches nothing at build time. Needs `deployment/` (a volume for `HF_HOME`, run-time download). `scripts/fetch_gate_model.py` never fetches the main local model.
+1. ~~Model, compute type and threads of the local engine were constants.~~ **Resolved 2026-11-08** (T-01.2.2 and T-01.2.3, [ADR-008](../decisions/ADR-008-local-model-settings.md)): `STT_MODEL`, `STT_THREADS` and `STT_COMPUTE_TYPE` are settings used by the main model and the gate ([audit](../deployment_audit/stt.md)). The number is kept so other documents that cite "debt 1" stay valid.
+2. ~~Dev tools in the runtime requirements.~~ **Resolved 2026-11-08** (T-01.4): pytest, httpx, ruff, black and mypy are in `requirements.dev.txt`, which the deploy tool never reads; `requirements.windows.txt` and `requirements.linux.txt` hold only what the service runs on. A venv built earlier keeps the tools until it is rebuilt. The number is kept so other documents that cite "debt 2" stay valid.
+3. ~~The model cache is not persistent in Docker, and the deploy `prepare` step fetches nothing at build time.~~ **Resolved on amd64 on 2026-11-09** (T-03.3, real image and volume; arm64 postponed). Natively `scripts/fetch_gate_model.py` fetches the main local model too since T-01.3.2 (2026-11-08). The Docker part is **built in `deployment/` since 2026-11-09** (T-02.2 to T-02.4: volume `oblivion-stt-models` at `/models`, `HF_HOME=/models/huggingface` only for Docker, `prepare` run once in a throw-away container with the real `.env`) and proved with a real image on 2026-11-09: a restart, a recreate and a rebuild did not download again (T-03.1 to T-03.5).
 4. **Failures of a `set` reach Brain only through `get`.** The ack always ends with `input_completed`; the contract tests for an `error` in the ack use a fake service (`RecordingSetService`) that propagates the failure, which the real `SttService` does not.
 5. **No limit and no timeout:** no cap on a request body or an utterance, no timeout or retry policy chosen for the OpenAI call.
 6. **No authentication** ([security.md](../security/security.md)).
 7. **Lint:** ruff, mypy and black are configured but not installed in this venv; ruff (from the microphone venv) reported 9 findings on 2026-10-01, not fixed on purpose.
-8. **`tests/simple.py`** is an end-to-end script that needs a running service and real audio; it was not run in the last pass.
+8. **`tests/simple.py`** is an end-to-end script that needs a running service. It ran once, on 2026-11-06 against a scratch deployment (T-01.1.3): it only checks `/health` and `/available`, transcribes nothing, and on a Windows console needs `python -X utf8`.
 9. **`domain/operations/`** is an empty package left from the moment silence detection moved out.
+10. **No lock file.** Since T-01.6 (2026-11-08) the seven packages the service imports are pinned exactly, but the packages they depend on (ctranslate2, onnxruntime, starlette, huggingface_hub, ...) are not, so a new release of one of those can still change a deploy. The `numpy` line falls back to an open bound on Python 3.11. Dependency scanning does not exist ([security](../security/security.md)).
 
 ## 9. History (not current)
 
@@ -131,4 +136,5 @@ Text and audio events are the `contracts.stream` events `STT_INBOUND`, `STT_OUTB
 * **2026-10-05, the gate** (commit `e366de1`): a second local engine under `/gate` whose `completed` events carry the utterance audio; `STT_PROMPT` for the OpenAI engine (`e980937`).
 * **2026-10-05, utterances only** (commit `79167ff`): silence detection moved to the microphone. `StreamSettings`, `PcmChunkAligner`, the silence rules and both engines' voice-activity loops were removed from here (they live in `microphone_microservice`: `UtteranceSegmenter`, `InputTreatment`, one `MICROPHONE_*` variable per treatment). The microphone sends one `utterance` event per utterance (contracts 0.12.0), Brain relays it as an STT inbound `utterance` event, and an engine is only `transcribe_batch` + `is_available`. The stream routes take no query settings; a raw-PCM upload is a `415`.
 * **Earlier refactor (date not recorded; before the 2026-09-20 commit):** the inbound, service and outbound DTO triples became one DTO per use case; the two engines share one `TranscriptionPort`; the 660-line `fastapi_adapter.py` was split into handler, framing, upload response and decoder; `runtime/` was replaced by the shared `shared_logging` package; engine modules are imported lazily.
-* **Contracts wheel (from the git log):** 0.8.0 (2026-09-25), 0.9.0 and 0.10.0 (2026-10-01), 0.11.0 (2026-10-05, the gate's `audio_base64`), 0.14.0 (2026-10-07), 0.15.0 (2026-10-08, current).
+* **Contracts wheel (from the git log):** 0.8.0 (2026-09-25), 0.9.0 and 0.10.0 (2026-10-01), 0.11.0 (2026-10-05, the gate's `audio_base64`), 0.14.0 (2026-10-07), 0.15.0 (2026-10-08, the committed one; 0.16.0 is in the maintainer's working tree, uncommitted).
+* **2026-11-06 to 2026-11-08, deployment readiness** (the plan in `docs/tasks`, uncommitted): both engines and the gate run for real on a Windows PC (T-01.1); the OpenAI engine's failures are a fixed message ([ADR-007](../decisions/ADR-007-http-status-mapping.md) update); `STT_MODEL`, `STT_THREADS` and `STT_COMPUTE_TYPE` ([ADR-008](../decisions/ADR-008-local-model-settings.md)); `scripts/fetch_gate_model.py` fetches the main model too; the dev tools moved to `requirements.dev.txt`; the Docker model delivery is decided ([ADR-009](../decisions/ADR-009-model-delivery-in-docker.md)) and not built.

@@ -15,7 +15,11 @@ from application.ports.outbound.transcription_port import TranscriptionPort
 
 logger = get_logger(__name__)
 
+# What the engine builds when it is given nothing: the values it always used. The settings
+# (STT_MODEL, STT_THREADS, STT_COMPUTE_TYPE) have the same defaults in SttConfig.
 DEFAULT_MODEL_NAME = "small.en"
+DEFAULT_CPU_THREADS = 2
+DEFAULT_COMPUTE_TYPE = "int8"
 _WHISPER_SAMPLE_RATE = 16000
 
 
@@ -43,15 +47,21 @@ class LocalWhisperTranscription(TranscriptionPort):
         *,
         initial_prompt: str | None = None,
         beam_size: int = 5,
+        cpu_threads: int = DEFAULT_CPU_THREADS,
+        compute_type: str = DEFAULT_COMPUTE_TYPE,
     ) -> None:
         self._language = language or "en"
         self._initial_prompt = initial_prompt
         self._beam_size = beam_size
         logger.info(
-            "Loading local Whisper model on CPU with int8 compute",
+            "Loading local Whisper model on CPU",
             model_name=model_name,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads,
         )
-        self._model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=2)
+        self._model = WhisperModel(
+            model_name, device="cpu", compute_type=compute_type, cpu_threads=cpu_threads
+        )
         logger.info(
             "Local Whisper model loaded",
             model_name=model_name,

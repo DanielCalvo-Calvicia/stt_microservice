@@ -2,7 +2,7 @@
 
 Port **8001** (`SERVICE_PORT`). Python/FastAPI. Speech to text: it turns finished utterances (16-bit mono PCM) into text with the OpenAI Whisper API or a local faster-whisper model, and has an optional wake-phrase gate. Read [README.md](README.md) for the state and the endpoints, [docs/architecture/architecture.md](docs/architecture/architecture.md) for the structure and `../CLAUDE.md` for the workspace rules.
 
-Current state (2026-11-05): branch `feature_ai_claude_2` (tracks `origin/feature_ai_claude_2`), last feature commit `853d1bf` "Bundle contracts 0.15.0". Status: working, needs retest after recent changes. Tests: `90 passed` (2026-11-05, about 3 s, no model, no network). Ruff/mypy are not installed in this venv (the microphone venv's ruff reported 9 findings here on 2026-10-01, unfixed). The real engines (OpenAI call, faster-whisper model) and `tests/simple.py` were not run in the last documentation pass.
+Current state (2026-11-08): branch `feature_ai_claude_2` (tracks `origin/feature_ai_claude_2`), last feature commit `853d1bf` "Bundle contracts 0.15.0"; HEAD is `bcd76a0` (documentation, not pushed) and the working tree holds the uncommitted work of the deployment plan (`docs/tasks`) and the maintainer's `contracts` 0.16.0 edit. Status: working, needs retest after recent changes. Tests: `140 passed` (2026-11-08, about 3 s, no model, no network; 90 before T-01.7, T-01.2.2, T-01.2.3, T-01.3.1 and T-01.3.2). Ruff/mypy are not installed in this venv (the microphone venv's ruff reported 9 findings here on 2026-10-01, unfixed). The local engine, the gate and the OpenAI engine were run for real on a Windows PC on 2026-11-06 (T-01.1.2 to T-01.1.4: models downloaded, spoken English transcribed, `tests/simple.py` passed its two checks with `python -X utf8`); the failure drills ran on 2026-11-06 (T-01.1.5); the wake-phrase round trip through Brain ran with a real microphone on 2026-11-09 (T-01.1.7: the path works; the gate then heard the name 1 time in 4, so the gate defaults became `base` and `Oblivion 306.` on 2026-11-09, tuned offline on 16 real clips and not re-run live); a Raspberry Pi and Docker was run on amd64 on 2026-11-09 (T-03.1 to T-03.5: the image, the volume `oblivion-stt-models`, a restart and a recreate without a download; the OpenAI engine ran inside the container too); a Raspberry Pi has not been run (postponed by the maintainer until everything works on Windows).
 
 ## MANDATORY: every change updates the documentation
 
@@ -23,7 +23,7 @@ Current state (2026-11-05): branch `feature_ai_claude_2` (tracks `origin/feature
 How to do it:
 1. Change the documents **with** the change, and say what you updated when you report the work.
 2. Use dated notes (`> **Update 2026-11-05:** ...`) in documents that are history (ADRs, the audit in `docs/deployment_audit/`); correct the text in documents that describe the present (requirements, architecture, README, API, configuration, monitoring, security, deployment).
-3. Mark what is planned as **Planned** and what is built as **Built**; never describe as working something that was not run. The real engines and the hardware-dependent parts have not been run recently: say so.
+3. Mark what is planned as **Planned** and what is built as **Built**; never describe as working something that was not run. The OpenAI engine, the local engine and the gate were run for real on a Windows PC on 2026-11-06; a Raspberry Pi, Docker and anything that needs hardware have not been run: say so.
 4. After editing, check that the links still resolve and that every path named in a document exists.
 5. When the documents and the code disagree and you cannot tell which is right, do not guess: ask the maintainer.
 
@@ -37,12 +37,12 @@ Brain feeds it finished utterances and reads the text back. STT does **no** sile
 | `GET /process/stream/get` | Brain reads text events (SSE, or NDJSON with `Accept`); heartbeat every 15 s; 404 if nothing was set |
 | `POST /process/stream` | Single-request variant (NDJSON `utterance` events in the body, answers SSE). No query settings |
 | `POST /process/batch?sample_rate=` | One PCM buffer -> `data: {text}`; 400 on an empty body |
-| `/gate/process/stream/{set,get}` | Only with `STT_GATE_ENABLED=1`: the wake-phrase gate, a second local faster-whisper (`STT_GATE_MODEL`, default `tiny.en`, greedy, `STT_GATE_PROMPT` as hint) with its own shared stream. Its `completed` events carry the utterance audio in `audio_base64` (contracts 0.11.0). Brain decides from the text; the real STT only gets `/process/batch` with that audio |
+| `/gate/process/stream/{set,get}` | Only with `STT_GATE_ENABLED=1`: the wake-phrase gate, a second local faster-whisper (`STT_GATE_MODEL`, default `base`, greedy, `STT_GATE_PROMPT`, default `Oblivion 306.`, as hint) with its own shared stream. Its `completed` events carry the utterance audio in `audio_base64` (contracts 0.11.0). Brain decides from the text; the real STT only gets `/process/batch` with that audio |
 | `GET /health`, `/available`, `POST /stop` | Liveness, engine readiness, stop |
 
 Errors: 404 no stream set, 415 body that is not NDJSON, 422 invalid utterance (only when it is raised before the stream starts), 400 empty batch body, else 500. A failure after a stream has started is an `error` event in the stream, not a status. Full detail: [docs/api/api.md](docs/api/api.md).
 
-Engines: `STT_ENGINE=openai` (default, Whisper API `whisper-1`, needs `OPENAI_API_KEY`) or any other value, such as `local` (faster-whisper `small.en`, CPU, int8, 2 threads: constants in `local_whisper_transcription.py`, not settings). `STT_LANGUAGE` forces the language (default `en`). Other env: `SERVICE_NAME/HOST/PORT`, `LOG_LEVEL`, `STT_PROMPT`. A `.env` next to `main.py` is loaded by `main_flow/http.py`. All variables: [docs/configuration/environment-variables.md](docs/configuration/environment-variables.md).
+Engines: `STT_ENGINE=openai` (default, Whisper API `whisper-1`, needs `OPENAI_API_KEY`) or any other value, such as `local` (faster-whisper on the CPU: `STT_MODEL` default `small.en`, `STT_THREADS` default 2, `STT_COMPUTE_TYPE` default `int8`; the gate shares the threads and the compute type, ADR-008). `STT_LANGUAGE` forces the language (default `en`). Other env: `SERVICE_NAME/HOST/PORT`, `LOG_LEVEL`, `STT_PROMPT`. A `.env` next to `main.py` is loaded by `main_flow/http.py`. All variables: [docs/configuration/environment-variables.md](docs/configuration/environment-variables.md).
 
 ## Layout
 
@@ -53,8 +53,8 @@ Engines: `STT_ENGINE=openai` (default, Whisper API `whisper-1`, needs `OPENAI_AP
 - Events use `contracts.stream` (`STT_INBOUND`/`STT_OUTBOUND`, `UPLOAD_ACK`) and the shared codec. Never hand-write event JSON.
 - The old autoloader (direct pull from another service's stream) was removed on purpose (archived in `docs/old/autoloader/`). Do not reintroduce direct service-to-service calls. Brain coordinates.
 - Never log or echo `OPENAI_API_KEY`. Do not open `.env`. Do not log the text or the audio of an utterance (the service logs lengths only).
-- `contracts` comes from `vendor/contracts_microservice-<version>.whl` (0.15.0); refresh it with `contracts/scripts/bundle.py`.
-- Ruff/mypy/black are configured in `pyproject.toml` but not installed in this venv, and they are listed in the runtime requirement files (known debt, see the architecture document). Install them first if you need them, and do not bulk-fix lint unasked.
+- `contracts` comes from `vendor/contracts_microservice-<version>.whl` (0.15.0 is the committed version; the working tree has the maintainer's uncommitted 0.16.0); refresh it with `contracts/scripts/bundle.py`.
+- Ruff/mypy/black are configured in `pyproject.toml` and listed, with pytest and httpx, in `requirements.dev.txt` (install it on top of the runtime file; the deploy tool never installs it). They are not installed in this venv: install them first if you need them, and do not bulk-fix lint unasked.
 - `.engram/` holds old notes. Do not trust it over the code. `docs/deployment_audit/stt.md` is the audit of 2026-11-04 (a record, not the source of truth).
 - Do not commit or push unless asked.
 
@@ -62,5 +62,6 @@ Engines: `STT_ENGINE=openai` (default, Whisper API `whisper-1`, needs `OPENAI_AP
 
 ```powershell
 & windows\Scripts\python.exe main.py
+& windows\Scripts\python.exe -m pip install -r requirements.dev.txt   # once: pytest, httpx and the lint tools
 & windows\Scripts\python.exe -m pytest        # about 3 s, no model, no network
 ```

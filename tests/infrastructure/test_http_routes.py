@@ -1,16 +1,28 @@
 """Routes and error paths of SttHandler beyond the stream event contract."""
 
 import asyncio
+import json
 
 import httpx
 from fastapi import FastAPI
+from shared_logging.testing import capture
 
 from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
 from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
 from application.errors import NoActiveStream
+from application.services.stt_service import SttService
+from composition_root.dependencies import stt_dependencies as deps
 from domain.errors import InvalidAudioUtterance
 from infrastructure.inbound.http.http_handler import SttHandler
+from infrastructure.outbound.openai_whisper.openai_whisper_transcription import (
+    OpenAIWhisperTranscription,
+)
 from tests.infrastructure.test_http_handler import NDJSON, FakeService, upload_body
+from tests.infrastructure.test_transcription_engines import (
+    FAKE_KEY,
+    _failing_openai,
+    _wrong_key_error,
+)
 
 
 def _call(service: FakeService, method: str, path: str, **kwargs) -> httpx.Response:
@@ -99,3 +111,68 @@ def test_a_body_that_is_not_ndjson_is_rejected_up_front_with_a_415():
 
     assert response.status_code == 415
     assert response.json()["action"] == "set_stream"
+
+
+# --- a wrong OpenAI key must not come back in part, in an answer, an event or a log (T-01.7) ---
+
+FIXED_FAILURE = "OpenAI request failed: AuthenticationError (HTTP 401)"
+
+
+def _openai_app(monkeypatch) -> FastAPI:
+    """The real app and the real OpenAI engine; only the client is one the API refuses."""
+    _failing_openai(monkeypatch, _wrong_key_error())
+    service = SttService(OpenAIWhisperTranscription(FAKE_KEY), "stt")
+    return deps.new_http_app(service, "stt", None)
+
+
+def _ask(app: FastAPI, *requests: tuple[str, str, dict]) -> list[httpx.Response]:
+    async def run() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return [
+                await client.request(method, path, **kwargs) for method, path, kwargs in requests
+            ]
+
+    return asyncio.run(run())
+
+
+def _nothing_of_the_key(text: str) -> None:
+    assert "sk-" not in text and FAKE_KEY not in text
+    assert "Incorrect API key" not in text and "fake" not in text
+
+
+def test_a_wrong_openai_key_is_a_500_with_a_fixed_message_in_the_batch_and_the_log(monkeypatch):
+    app = _openai_app(monkeypatch)
+
+    with capture("stt") as logs:
+        (response,) = _ask(
+            app, ("POST", "/process/batch?sample_rate=16000", {"content": b"\x01\x00" * 100})
+        )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["message"] == f"Failed to process batch: {FIXED_FAILURE}"
+    assert body["data"] == FIXED_FAILURE
+    _nothing_of_the_key(response.text)
+    logged = json.dumps(logs.records, default=str)
+    assert FIXED_FAILURE in logged  # the failure is logged, with the fixed text
+    _nothing_of_the_key(logged)
+
+
+def test_a_wrong_openai_key_is_a_fixed_message_in_the_error_event_of_the_stream(monkeypatch):
+    app = _openai_app(monkeypatch)
+
+    with capture("stt") as logs:
+        sent, got = _ask(
+            app,
+            ("POST", "/process/stream/set", {"content": upload_body(b"hello!"), "headers": NDJSON}),
+            ("GET", "/process/stream/get", {"headers": {"Accept": "application/x-ndjson"}}),
+        )
+
+    assert sent.status_code == 200 and got.status_code == 200
+    events = [json.loads(line) for line in got.text.splitlines() if line.strip()]
+    (error,) = [event for event in events if event["type"] == "error"]
+    assert error["payload"]["code"] == "stream_failed"
+    assert error["payload"]["message"] == FIXED_FAILURE
+    _nothing_of_the_key(got.text)
+    _nothing_of_the_key(json.dumps(logs.records, default=str))

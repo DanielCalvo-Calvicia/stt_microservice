@@ -10,9 +10,10 @@ import tempfile
 import wave
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from shared_logging import get_logger
 
+from application.errors import TranscriptionFailed
 from application.ports.outbound.transcription_port import TranscriptionPort
 
 logger = get_logger(__name__)
@@ -64,6 +65,20 @@ def _call_whisper_api(client: OpenAI, wav_path: str, language: str, prompt: str 
     return result.strip() if isinstance(result, str) else str(result)
 
 
+def _transcription_failed(error: OpenAIError) -> TranscriptionFailed:
+    """A fixed message for an error of the OpenAI library: its type and HTTP status, never its text.
+
+    The library's text can echo part of the API key: a 401 says ``Incorrect API key provided:
+    <first 8 characters>***<last 4 characters>``. This message goes to the caller and the log.
+    """
+    error_type = type(error).__name__
+    status_code = getattr(error, "status_code", None)
+    logger.warning("OpenAI request failed", error_type=error_type, status_code=status_code)
+    if isinstance(status_code, int):
+        return TranscriptionFailed(f"OpenAI request failed: {error_type} (HTTP {status_code})")
+    return TranscriptionFailed(f"OpenAI request failed: {error_type}")
+
+
 class OpenAIWhisperTranscription(TranscriptionPort):
     def __init__(self, api_key: str, language: str = "en", prompt: str = "") -> None:
         self._api_key = api_key
@@ -78,6 +93,9 @@ class OpenAIWhisperTranscription(TranscriptionPort):
             text = await asyncio.to_thread(
                 _call_whisper_api, client, wav_path, self._language, self._prompt
             )
+        except OpenAIError as error:
+            # from None: no chained traceback that would print the library's text
+            raise _transcription_failed(error) from None
         finally:
             _remove_temp_file(wav_path)
         logger.info("OpenAI batch transcription completed", text_length=len(text))

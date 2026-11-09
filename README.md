@@ -13,23 +13,23 @@ engine = OpenAI Whisper API (default)  or  local faster-whisper  (+ optional gat
 
 ## Status
 
-Working, needs a retest after the recent changes. The code and the unit tests agree; the real engines and the end-to-end script have not been run recently.
+Working, needs a retest after the recent changes. The code and the unit tests agree (140 passed). The OpenAI engine, the local engine and the gate were run for real on a Windows PC on 2026-11-06 (see the table); Docker on amd64 was run on 2026-11-09 (T-03); a Raspberry Pi has not been run (postponed by the maintainer until everything works on Windows).
 
 | Area | State |
 |---|---|
 | Shared stream: `POST /process/stream/set`, `GET /process/stream/get`, `POST /stop` | Built, covered by tests with fake engines |
 | Single-request stream `POST /process/stream` and `POST /process/batch` | Built, covered by tests |
-| OpenAI engine (`whisper-1`, optional `STT_PROMPT`) | Built; the real API was **not** called in the last pass |
-| Local engine (faster-whisper on the CPU) | Built; the real model was **not** loaded in the last pass. Model, threads and compute type are constants (**Planned**: settings, see the audit) |
-| Wake-phrase gate under `/gate/...` (`STT_GATE_ENABLED=1`) | Built, covered by tests with fake engines; not run with a real model in the last pass |
-| `contracts` events, envelope, error mapping | Built (contracts 0.15.0 wheel in `vendor/`) |
+| OpenAI engine (`whisper-1`, optional `STT_PROMPT`) | Built; the real API was called on 2026-11-06 (T-01.1.4): spoken English transcribed exactly, about 0.7 to 1.5 s per utterance from a Windows PC; a wrong key gives the fixed message `OpenAI request failed: AuthenticationError (HTTP 401)` (T-01.7, 2026-11-06) |
+| Local engine (faster-whisper on the CPU) | Built; run for real on 2026-11-06 on a Windows PC (`small.en` downloaded, loaded and transcribed spoken English; about 4.5 to 5 s per utterance there; **not** run on a Raspberry Pi or in Docker). Model, threads and compute type are settings (`STT_MODEL`, `STT_THREADS`, `STT_COMPUTE_TYPE`, built in T-01.2.3 and unit-tested with a fake model; a non-default value was **not** run with a real model) |
+| Wake-phrase gate under `/gate/...` (`STT_GATE_ENABLED=1`) | Built, covered by tests with fake engines; the real `tiny.en` gate returned the spoken wake phrase with the utterance audio in under 1 s on 2026-11-06 (Windows PC). Through Brain with a real microphone on 2026-11-09 the path worked (no phrase: no batch request; phrase: exactly one), but the gate (then `tiny.en` with the prompt `Oblivion`) heard the name only 1 time in 4. Tuned the same day offline on 16 real clips: since then the defaults are `STT_GATE_MODEL=base` and `STT_GATE_PROMPT=Oblivion 306.` (8 of 10 phrases caught offline, 0 of 6 ordinary sentences, 0.6 s per clip on a PC). **Re-run live the same day: only 2 of 8 phrases were accepted** (3 ordinary sentences ignored correctly); the cause was found the same day: the microphone service started each utterance 0.01 to 0.12 s after the voiced onset and clipped the first sounds of the name. After a pre-roll was added to the microphone (`MICROPHONE_PREROLL_SECONDS`, 0.2 s) a third live run accepted **4 of 4** phrases that reached the gate (6 other utterances were dropped by Brain's echo guard while the robot was speaking; small sample, ADR-005). Not run on a Pi |
+| `contracts` events, envelope, error mapping | Built (contracts 0.15.0 wheel in `vendor/`, the committed version; the working tree has the maintainer's uncommitted 0.16.0) |
 | Silence detection | **Not here by design**: it lives in `microphone_microservice` |
 | Authentication, CORS, request size limit | **Not built** (see [docs/security/security.md](docs/security/security.md)) |
-| Docker image | None in this repo: `deployment/` builds it; the model cache is not persistent there (see [docs/deployment/deployment.md](docs/deployment/deployment.md)) |
+| Docker image | None in this repo: `deployment/` builds it. Built and run on amd64 on 2026-11-09 (865 MB, Python 3.12): the models live on the volume `oblivion-stt-models` ([ADR-009](docs/decisions/ADR-009-model-delivery-in-docker.md)) and a recreated container does not download again; runs as root; arm64 not run (see [docs/deployment/deployment.md](docs/deployment/deployment.md)) |
 
 ## Requirements
 
-- Python 3.14 in the service venv `windows\Scripts\python.exe` (the deployment Docker image uses 3.12; `pyproject.toml` targets 3.11).
+- Python 3.14 in the service venv `windows\Scripts\python.exe` (the deployment Docker image uses 3.12; `pyproject.toml` targets 3.11). The runtime packages are pinned to the versions the engines ran with (Python 3.12 or newer; on 3.11 `numpy` falls back to an open bound, not proven).
 - `OPENAI_API_KEY` when `STT_ENGINE=openai` (the default). Network access to the OpenAI API in that case.
 - For a local engine or the gate: `faster-whisper` (in the requirements), enough RAM for the model and network on the first start to download it.
 - The shared logging package (`../shared-logging`) and the bundled `contracts` wheel (`vendor/`).
@@ -60,12 +60,15 @@ The full table (defaults, who reads each variable, which are secret) is in [docs
 |---|---|---|
 | `SERVICE_NAME` / `SERVICE_HOST` / `SERVICE_PORT` | `STT Microservice` / `127.0.0.1` / `8001` | API title and log name, bind address and port |
 | `LOG_LEVEL` | `INFO` | Read by `shared_logging` (`TRACE`, `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`, `CRITICAL`) |
-| `STT_ENGINE` | `openai` | `openai` = Whisper API (`whisper-1`); any other value (for example `local`) = local faster-whisper (`small.en`, CPU, int8). Case-insensitive |
+| `STT_ENGINE` | `openai` | `openai` = Whisper API (`whisper-1`); any other value (for example `local`) = local faster-whisper (on the CPU; the model, threads and compute type are settings, see below). Case-insensitive |
 | `STT_LANGUAGE` | `en` | ISO-639-1 code forced on the transcription (empty falls back to `en`) |
 | `STT_PROMPT` | empty | OpenAI engine only: words the model should spell as written (for example `Oblivion 306`) |
+| `STT_MODEL` | `small.en` | Model of the local engine (the default is English only; a multilingual one such as `small` for other languages, with `STT_LANGUAGE`) |
+| `STT_THREADS` | `2` | CPU threads of every local model, the gate's too; `0` = let ctranslate2 choose; a bad value stops the start |
+| `STT_COMPUTE_TYPE` | `int8` | Compute type of every local model (`int8`, `float32`...) |
 | `STT_GATE_ENABLED` | `0` | `1` = also run the wake-phrase gate under `/gate/...` |
-| `STT_GATE_MODEL` | `tiny.en` | faster-whisper model of the gate (greedy decoding) |
-| `STT_GATE_PROMPT` | `Oblivion 306` | Hint so the gate spells the wake phrase right (empty = none) |
+| `STT_GATE_MODEL` | `base` | faster-whisper model of the gate (greedy decoding); multilingual, `tiny.en` is faster and misses the name more often, `small.en` is more exact and slower |
+| `STT_GATE_PROMPT` | `Oblivion 306.` | Hint so the gate spells the wake phrase right: give it the name and the code (empty = none) |
 | `OPENAI_API_KEY` | empty | **Secret.** Required when `STT_ENGINE=openai`. Never log or echo it |
 
 `LOG_FORMAT`, `LOG_OUTPUT`, `ENVIRONMENT` and `TRACE_EXPORT_*` are read by the shared logging package, not by this service: see [`shared-logging/docs/logging.md`](../shared-logging/docs/logging.md). Local models download on first use into the Hugging Face cache (`HF_HOME`, default `~/.cache/huggingface`; not read by this service).
@@ -96,10 +99,11 @@ composition_root/  the only place concrete adapters are wired together (engine c
 infrastructure/    config; HTTP inbound (handler, envelope, error mapper, SSE/NDJSON encoding, NDJSON utterance decoder); Whisper engines (outbound)
 application/       use-case service, ports, DTOs, application errors
 domain/            the utterance value objects and domain errors
-scripts/           fetch_gate_model.py (downloads the gate model; run by the deploy tool's `prepare` step)
-tests/             pytest by layer, plus architecture/ (the dependency rules) and simple.py (end to end, needs a running service)
+scripts/           fetch_gate_model.py (downloads the local models the settings need: the main model when the engine is local, the gate's when the gate is on; run by the deploy tool's `prepare` step; the name is kept because the deploy catalogue names it)
+tests/             pytest by layer, plus architecture/ (the dependency rules), scripts/ (the deploy `prepare` script) and simple.py (end to end, needs a running service)
 vendor/            the bundled contracts wheel
-docs/              architecture, API, configuration, deployment, monitoring, requirements, security, decisions
+requirements.*.txt requirements.windows.txt and requirements.linux.txt (what the service runs on; the deploy tool installs them); requirements.dev.txt (tests and lint; the tool never installs it)
+docs/              architecture, API, configuration, deployment, monitoring, requirements, security, decisions, tasks, questionnaires
 ```
 
 Dependencies point inward only (`infrastructure -> application -> domain`); `tests/architecture/` enforces this. The same layered layout as the other OBLIVION services ([ADR-001](docs/decisions/ADR-001-layered-architecture.md)).
@@ -107,11 +111,12 @@ Dependencies point inward only (`infrastructure -> application -> domain`); `tes
 ## Test
 
 ```powershell
+& windows\Scripts\python.exe -m pip install -r requirements.dev.txt   # once: pytest, httpx, ruff, black, mypy
 & windows\Scripts\python.exe -m pytest        # unit + architecture tests: no model, no network, no hardware
 & windows\Scripts\python.exe tests\simple.py  # end to end against a running service (needs real audio)
 ```
 
-Result on 2026-11-05: `90 passed` in about 3 s. `ruff`, `mypy` and `black` are configured in `pyproject.toml` but are **not installed in this venv**; the microphone venv's ruff reported 9 findings (4 auto-fixable) here on 2026-10-01, not fixed on purpose; mypy was not run. The real engines (OpenAI call, faster-whisper model) and `tests/simple.py` were not run in this pass.
+Result on 2026-11-08: `140 passed` in about 3 s (90 on 2026-11-05; T-01.7 added 5 tests, T-01.2.2 added 11, T-01.2.3 added 6, and T-01.3.1 and T-01.3.2 added 28 for the deploy `prepare` script). On 2026-11-06 the same 90 passed in a clean clone of the pushed branch (T-01.1.1, 6.7 s), and the workspace pipeline check (`brain_microservice\windows\Scripts\python.exe -m pytest contracts\tests -q` from the workspace root, stt as a fake engine behind the real handler) gave `84 passed, 18 skipped` in 82 s (T-01.1.6; the skips are the real-LLM tests and requirement files a service does not have). `ruff`, `mypy` and `black` are configured in `pyproject.toml` but are **not installed in this venv**; the microphone venv's ruff reported 9 findings (4 auto-fixable) here on 2026-10-01, not fixed on purpose; mypy was not run. The real engines (OpenAI call, faster-whisper model) and `tests/simple.py` were not run in this pass.
 
 ## Scope
 
@@ -121,13 +126,12 @@ Result on 2026-11-05: `90 passed` in about 3 s. `ruff`, `mypy` and `black` are c
 
 ## Known limitations
 
-- The local model (`small.en`, English only), the compute type (`int8`) and the thread count (2) are constants: `STT_LANGUAGE=es` cannot work with the local engine. Planned: settings (see [docs/deployment_audit/stt.md](docs/deployment_audit/stt.md)).
-- In a container nothing persists the Hugging Face cache, and the deploy `prepare` step has no settings at build time, so a local model downloads again on every new container.
+- In a container the Hugging Face cache lives on the named volume `oblivion-stt-models`, filled by `prepare` run once in a throw-away container ([ADR-009](docs/decisions/ADR-009-model-delivery-in-docker.md)); verified on amd64 on 2026-11-09 (a recreated container does not download again). With an empty volume and no network the container crash-loops; the container runs as root; arm64 was not run (the OpenAI engine did run inside the container).
 - The shared stream is one queue: each text event is delivered once, to whoever reads it first (Brain is the only reader).
 - A failure while a `set` upload is processed (bad event, not mono, an engine error) reaches Brain as an `error` event on `get`; the ack of the `set` request still ends with `input_completed`. The contract tests of the ack use a fake service that propagates the failure, so they do not show this (probed against the real service on 2026-11-05).
+- Only the seven packages the service imports are pinned; the packages they depend on are not (no lock file), and nothing scans the dependencies.
 - No authentication, no request size limit: anyone who can reach the port can send audio (to a paid API when the engine is OpenAI).
-- pytest, ruff, black and mypy are in the runtime requirement files, so they are installed in the deployed image.
-- The real engines and the end-to-end script were not run in the last pass; the retest of the whole service is pending.
+- A Raspberry Pi has not been run (postponed); Docker ran on amd64 on 2026-11-09. The local engine, the gate and the OpenAI engine were run for real on a Windows PC on 2026-11-06 (T-01.1.2 to T-01.1.4 of [docs/tasks](docs/tasks/README.md)); `tests/simple.py` ran against it and only checks `/health` and `/available` (on a Windows console it needs `python -X utf8`, or it fails printing its box characters). The retest of the whole service is pending.
 
 ## Documentation
 
@@ -140,7 +144,9 @@ Result on 2026-11-05: `90 passed` in about 3 s. `ruff`, `mypy` and `black` are c
 | [docs/operations/monitoring.md](docs/operations/monitoring.md) | Probes, shutdown, logs, files on disk |
 | [docs/security/security.md](docs/security/security.md) | What is implemented, what is not, what leaves the machine |
 | [docs/requirements/requirements.md](docs/requirements/requirements.md) | Functional and non-functional requirements with their status |
-| [docs/decisions/](docs/decisions/) | Architecture decision records (ADR-001 to ADR-007) |
+| [docs/decisions/](docs/decisions/) | Architecture decision records (ADR-001 to ADR-009) |
 | [docs/deployment_audit/stt.md](docs/deployment_audit/stt.md) | The deployment audit of 2026-11-04 (a record) |
+| [docs/tasks/](docs/tasks/README.md) | The deployment task plan of 2026-11-06 (epics T-01 to T-04, [order](docs/tasks/ORDER.md)) |
+| [docs/questionnaires/](docs/questionnaires/00_README.md) | Questions only the maintainer can answer (Q01: the decisions and facts the task plan needs) |
 | [docs/old/](docs/old/) | The previous layout and the removed autoloader (history, not current) |
 | [CLAUDE.md](CLAUDE.md) | Rules for working in the repository, including the mandatory update of the documentation with every change |

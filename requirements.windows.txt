@@ -1,21 +1,21 @@
-fastapi>=0.110.0
-uvicorn>=0.29.0
-python-dotenv>=1.0.1
-pydantic>=2.6.4
-numpy>=1.26.4
-openai>=1.14.0
-faster-whisper>=1.0.1
-httpx>=0.27.0
-pytest>=9.0.0
+# Exact versions of the packages the service imports: the ones installed in the venv where the
+# local engine, the gate and the OpenAI engine ran for real (2026-11-06, Python 3.14). Their own
+# dependencies are not pinned (no lock file). To move a pin: install it, run the engines, change the line.
+fastapi==0.162.0
+uvicorn==0.54.0
+python-dotenv==1.2.4
+pydantic==2.14.3
+# numpy 2.5.4 has no Python 3.11 build: 3.11 keeps the old open bound (not proven)
+numpy==2.5.4; python_version >= "3.12"
+numpy>=1.26.4; python_version < "3.12"
+openai==3.46.0
+faster-whisper==1.2.1
 
-# Tooling
-ruff
-black
-mypy
+# Tests and lint are in requirements.dev.txt, not here: the deploy tool installs this file.
 
 # Shared logging + distributed tracing (local checkout; see shared-logging/README.md)
 -e ../shared-logging
 
 # Project contracts (single source of truth for what microservices exchange), bundled in this
 # folder so the service builds on its own. Refresh with contracts/scripts/bundle.py
-./vendor/contracts_microservice-0.15.0-py3-none-any.whl
+./vendor/contracts_microservice-0.16.0-py3-none-any.whl
