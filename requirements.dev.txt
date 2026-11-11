@@ -1,0 +1,14 @@
+# Development tools: tests, lint, type check. NOT installed by the deploy tool, which reads only
+# requirements.windows.txt / requirements.linux.txt (config/catalogue.toml of the deployment repo).
+# Install on top of the runtime file:
+#     pip install -r requirements.windows.txt   (requirements.linux.txt on Linux)
+#     pip install -r requirements.dev.txt
+
+pytest>=9.0.0
+# imported by the tests and tests/simple.py; the service does not need it (openai 3.x brings httpx2, older openai brings httpx)
+httpx>=0.27.0
+
+# Lint and types (configured in pyproject.toml)
+ruff
+black
+mypy
