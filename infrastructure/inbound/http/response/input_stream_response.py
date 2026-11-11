@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from shared_logging import get_logger
 from starlette.types import Receive, Scope, Send
 
-from infrastructure.inbound.http.stream_events import Formatter, sse_format
+from infrastructure.inbound.http.response.stream_events import Formatter, sse_format
 
 logger = get_logger(__name__)
 

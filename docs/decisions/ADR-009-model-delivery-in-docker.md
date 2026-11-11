@@ -1,6 +1,6 @@
 # ADR-009: In Docker the local models live in a named volume and the `prepare` step runs against the real settings
 
-- **Status:** Accepted, not built (the deploy-tool changes are T-02.2 to T-02.5 in `docs/tasks`).
+- **Status:** Accepted and built in `deployment/` (T-02.2 to T-02.5, 2026-11-09); proved on amd64 with a real image (T-03.1 to T-03.5, 2026-11-09); arm64 and a Raspberry Pi not run.
 - **Date:** 2026-11-06.
 
 ## Context
@@ -26,3 +26,5 @@ Option B ([T-02.1](../tasks/T-02_deployment-tool-changes/T-02.1_model-delivery-d
 > **Update 2026-11-06 (T-01.1.2):** the first start of a **native** install with an empty cache, on the maintainer's Windows PC with a fast connection, took about 28 s to download and load the main model `small.en` (464 MB) after `prepare` had fetched the gate's `tiny.en` (75 MB), and the whole `deploy` took 126 s. That is under the 60 s waits of the deploy tool and of Brain's preflight; it says nothing yet about a Raspberry Pi (T-03.6) or a container (T-03.2, T-03.3). A warm restart took 5 s. This note does not change the decision.
 
 > **Update 2026-11-09 (T-02.2 to T-02.5):** built in the `deployment` repository as decided: catalogue keys `volumes`, `prepare_at_run` and `docker_env` (a Docker-only variable in the computed layer), the stt entry with `volumes = { models = "/models" }` and `HF_HOME=/models/huggingface`, the build without the `PREPARE` argument for a `prepare_at_run` service, and `docker run --rm` of the prepare command between the build and the start. Tested with fake shells (`deployment/tests/test_docker_volumes.py`); the restart without a re-download and the no-network first start are still unproven until T-03.3 and T-03.5 run with a real image.
+
+> **Update 2026-11-11 (T-03.1 to T-03.5, run on 2026-11-09):** proved on amd64 with Docker Desktop and a real image (865 MB, Python 3.12): the run-time `prepare` filled the volume `oblivion-stt-models` (539 MB); a restart (3.1 s), a recreate (5.4 s) and a rebuild did not download again and the volume stayed at 551,212 KiB; the model loaded from the volume with the network off; with an empty volume and no network the container crash-loops (`LocalEntryNotFoundError`), as the consequences above say. Not run on arm64 or a Raspberry Pi (T-03.6 and T-03.7, postponed). Numbers and checks: [deployment.md](../deployment/deployment.md), *Verified deployments*, and [requirements](../requirements/requirements.md) NFR-9.

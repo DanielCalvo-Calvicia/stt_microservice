@@ -15,13 +15,13 @@ from contracts.stream.microservices.stt.inbound.utterance import (
 )
 from fastapi import FastAPI
 
-from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
-from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
-from application.dtos.set_stream_inbound import SetStreamInboundDTO
-from application.dtos.text_stream_outbound import TextStreamOutboundDTO
-from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_stream_inbound import ProcessStreamInboundDTO
+from application.dtos.inbound.set_stream_inbound import SetStreamInboundDTO
+from application.dtos.outbound.batch_transcription_outbound import BatchTranscriptionOutboundDTO
+from application.dtos.outbound.text_stream_outbound import TextStreamOutboundDTO
+from application.ports.service.stt_service_port import SttServicePort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
 from application.services.stt_service import SttService
 from domain.value_objects.audio_utterance import AudioUtterance
 from infrastructure.inbound.http.http_handler import SttHandler
@@ -87,7 +87,7 @@ async def _text_then_failing_stream() -> AsyncIterator[str]:
     raise RuntimeError("transcription backend unavailable")
 
 
-class FakeService(SttTranscriptionPort):
+class FakeService(SttServicePort):
     def __init__(
         self,
         *,
@@ -134,7 +134,7 @@ class RecordingSetService(FakeService):
             self.utterances.append(utterance)
 
 
-class FakeTranscription(TranscriptionPort):
+class FakeTranscription(SttOutboundPort):
     """Answers the given texts, one per utterance, in order (an empty text = no speech in it)."""
 
     def __init__(self, texts: list[str] | None = None) -> None:
@@ -150,7 +150,7 @@ class FakeTranscription(TranscriptionPort):
         return True
 
 
-def _app_for(service: SttTranscriptionPort) -> FastAPI:
+def _app_for(service: SttServicePort) -> FastAPI:
     app = FastAPI()
     app.include_router(SttHandler(service).router)
     return app

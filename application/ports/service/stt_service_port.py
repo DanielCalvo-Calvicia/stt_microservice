@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
 
-from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
-from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
-from application.dtos.set_stream_inbound import SetStreamInboundDTO
-from application.dtos.text_stream_outbound import TextStreamOutboundDTO
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_stream_inbound import ProcessStreamInboundDTO
+from application.dtos.inbound.set_stream_inbound import SetStreamInboundDTO
+from application.dtos.outbound.batch_transcription_outbound import BatchTranscriptionOutboundDTO
+from application.dtos.outbound.text_stream_outbound import TextStreamOutboundDTO
 
 
-class SttTranscriptionPort(ABC):
-    """What the outside world may ask of the application."""
+class SttServicePort(ABC):
+    """The service's own port: the speech-to-text use cases. ``SttService`` implements it; the inbound adapters
+    call it (through the inbound port); nothing else in the application knows the concrete service."""
 
     @abstractmethod
     async def process_stream(self, request: ProcessStreamInboundDTO) -> TextStreamOutboundDTO:

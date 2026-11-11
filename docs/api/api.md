@@ -1,6 +1,6 @@
 # HTTP API of the service
 
-What `python main.py` answers today, checked against the code (`infrastructure/inbound/http/`, `composition_root/dependencies/stt_dependencies.py`) and the tests. The only caller is Brain; there is no authentication and no CORS (see [security](../security/security.md)). The wire format is the `contracts` package (the 0.15.0 wheel in `vendor/`): events are encoded and decoded only with `contracts.stream.codec`.
+What `python main.py` answers today, checked against the code (`infrastructure/inbound/http/`, `composition_root/dependencies/http_app_dependency.py`) and the tests. The only caller is Brain; there is no authentication and no CORS (see [security](../security/security.md)). The wire format is the `contracts` package (the 0.16.0 wheel in `vendor/`): events are encoded and decoded only with `contracts.stream.codec`.
 
 Audio is **PCM16, little-endian, mono**. The service never converts it; the local engine resamples to Whisper's 16 kHz inside its own call when an utterance has another rate.
 
@@ -88,7 +88,7 @@ Every non-stream JSON answer is `contracts.api.common.envelope.ApiEnvelope`:
 
 ## Errors
 
-The mapping is in `infrastructure/inbound/http/http_error_mapper.py`.
+The mapping is in `infrastructure/inbound/http/errors/http_error_mapper.py`.
 
 | Status | When |
 |---|---|

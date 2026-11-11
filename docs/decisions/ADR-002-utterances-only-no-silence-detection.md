@@ -18,3 +18,5 @@ The microphone cuts the audio into utterances (`UtteranceSegmenter`, `InputTreat
 - A very long utterance is transcribed as one batch: STT has no cap on its length.
 - Brain and the microphone must be on a compatible `contracts` version; the wheel in `vendor/` is the reference.
 - `domain/operations/` stayed as an empty package ([architecture](../architecture/architecture.md), known debt 9).
+
+> **Update 2026-11-11:** the empty `domain/operations/` package was removed.

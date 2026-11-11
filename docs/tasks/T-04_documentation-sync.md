@@ -31,3 +31,4 @@ After T-01, after T-02 and after T-03 (and whenever a task note says a document 
 | Pass | Date | Notes |
 |---|---|---|
 | 1 | 2026-11-06 | Plan written; nothing executed yet. |
+| 2 | 2026-11-11 | Done after the restructure of that day. Counts: 152 tests, contracts wheel 0.16.0 committed in `8ee7c7d` (not pushed; the venv still has 0.15.0), HEAD `8ee7c7d` in `CLAUDE.md`, `README.md`, the architecture header, the requirements header and the API header. Debt 9 resolved; ADR-004, ADR-005 and ADR-009 (status lines, ADR-009 dated update) brought up to date; the paths of the code that moved (ports, DTOs, dependencies, the inbound HTTP folder, the constants of the configuration document). Not done: the audit and these task files keep their paths of the time (records); the `deployment` repository's documents were not read in this pass (item 3 of the checklist). |

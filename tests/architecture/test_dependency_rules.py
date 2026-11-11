@@ -131,11 +131,17 @@ def test_no_print_calls_outside_infrastructure(package):
 
 
 def test_no_utils_common_or_helpers_modules():
+    """``helpers`` is allowed in one place only: ``infrastructure/inbound/http/helpers`` (the same folder name as
+    the inbound adapter of dynamics_microservice). Anywhere else it is a dumping ground."""
     banned = {"utils", "common", "helpers"}
+    allowed_helpers = ROOT / "infrastructure" / "inbound" / "http" / "helpers"
     problems = []
     for package in ("domain", "application", "infrastructure", "composition_root", "main_flow"):
         for path in python_files(package):
             parts = {p.removesuffix(".py") for p in path.relative_to(ROOT).parts}
-            if parts & banned:
+            wrong = parts & banned
+            if wrong == {"helpers"} and allowed_helpers in path.parents:
+                continue
+            if wrong:
                 problems.append(str(path.relative_to(ROOT)))
     assert not problems, "\n".join(problems)

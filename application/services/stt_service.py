@@ -3,14 +3,14 @@ from collections.abc import AsyncIterator
 
 from shared_logging import get_logger
 
-from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
-from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
-from application.dtos.set_stream_inbound import SetStreamInboundDTO
-from application.dtos.text_stream_outbound import TextStreamOutboundDTO
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_stream_inbound import ProcessStreamInboundDTO
+from application.dtos.inbound.set_stream_inbound import SetStreamInboundDTO
+from application.dtos.outbound.batch_transcription_outbound import BatchTranscriptionOutboundDTO
+from application.dtos.outbound.text_stream_outbound import TextStreamOutboundDTO
 from application.errors import NoActiveStream, SharedStreamForwardingError
-from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
+from application.ports.service.stt_service_port import SttServicePort
 from domain.value_objects.audio_utterance import AudioUtterance
 from domain.value_objects.utterance import Utterance
 
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 _TextQueue = asyncio.Queue[str | Utterance | Exception | None]
 
 
-class SttService(SttTranscriptionPort):
+class SttService(SttServicePort):
     """Orchestrates the speech-to-text use cases. Business rules live in the domain.
 
     It receives finished utterances (the microphone cuts them, STT does no silence detection) and
@@ -28,7 +28,7 @@ class SttService(SttTranscriptionPort):
     """
 
     def __init__(
-        self, transcription: TranscriptionPort, name: str = "stt_service", *, with_audio: bool = False
+        self, transcription: SttOutboundPort, name: str = "stt_service", *, with_audio: bool = False
     ) -> None:
         self.name = name
         self._with_audio = with_audio

@@ -18,3 +18,5 @@ The first version caught every exception and answered `500`; an empty batch body
 - The failure text goes back to the caller as the exception message: it is not sanitised ([security](../security/security.md)).
 
 > **Update 2026-11-06 (T-01.7):** the last consequence changed for the OpenAI engine. Its failures are now `TranscriptionFailed` with a fixed message (`OpenAI request failed: <ErrorType> (HTTP <status>)`), so the failure text that goes back to the caller and to the log is no longer the library's text; a wrong key used to come back with its first 8 and last 4 characters (found in T-01.1.5). The status stays `500`. The local engine's failures are still the exception text.
+
+> **Update 2026-11-11:** the mapper moved to `infrastructure/inbound/http/errors/http_error_mapper.py` when the inbound adapter folder was split into `routes/`, `response/`, `errors/` and `helpers/`. The mapping did not change.

@@ -1,212 +1,106 @@
-"""HTTP inbound adapter: decode -> call the inbound port -> encode. No business rules."""
+"""HTTP inbound adapter: declares the endpoints and wires each one to its route. No request logic of its own."""
 
-import time
-from collections.abc import AsyncIterator
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, Response
 
-from contracts.api.microservices.common.availability import AvailabilityResponse
-from contracts.api.microservices.common.health_check import HealthCheckResponse
-from contracts.api.microservices.stt.process_batch import STTProcessBatchResponse
-from fastapi import APIRouter, Request, status
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from shared_logging import get_logger
-
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
-from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
-from application.dtos.set_stream_inbound import SetStreamInboundDTO
-from application.errors import NoActiveStream, UnsupportedInput
-from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
-from domain.value_objects.audio_utterance import AudioUtterance
-from infrastructure.inbound.http.http_envelope import failure, failure_message, success
-from infrastructure.inbound.http.input_stream_response import InputStreamResponse
-from infrastructure.inbound.http.ndjson_audio_input import ndjson_utterances
-from infrastructure.inbound.http.stream_events import (
-    Formatter,
-    ndjson_format,
-    sse_format,
-    text_event_stream,
-)
-
-logger = get_logger(__name__)
-
-_DEFAULT_BATCH_SAMPLE_RATE = 16000
-_NDJSON = "application/x-ndjson"
-_SSE = "text/event-stream"
-_GET_HEARTBEAT_SECONDS = 15.0
-
-
-def _wants_ndjson(request: Request) -> bool:
-    return _NDJSON in request.headers.get("accept", "").lower()
-
-
-def _is_ndjson_request(request: Request) -> bool:
-    return _NDJSON in request.headers.get("content-type", "").lower()
-
-
-def _stream_headers(action: str, status_text: str, message: str) -> dict[str, str]:
-    return {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Action": action,
-        "X-Status": status_text,
-        "X-Message": message,
-        "X-Timestamp": str(time.time()),
-    }
-
-
-async def _request_body_chunks(request: Request) -> AsyncIterator[bytes]:
-    async for chunk in request.stream():
-        logger.debug("Received stream chunk", bytes=len(chunk))
-        yield chunk
-
-
-def _utterances_of(request: Request) -> AsyncIterator[AudioUtterance]:
-    """The utterances in the request body: NDJSON events of the STT inbound contract, nothing else."""
-    if not _is_ndjson_request(request):
-        raise UnsupportedInput(
-            "the body must be NDJSON events of the STT inbound contract (Content-Type: application/x-ndjson)"
-        )
-    return ndjson_utterances(_request_body_chunks(request))
-
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_stream_inbound import ProcessStreamInboundDTO
+from application.dtos.inbound.set_stream_inbound import SetStreamInboundDTO
+from application.dtos.outbound.batch_transcription_outbound import BatchTranscriptionOutboundDTO
+from application.dtos.outbound.text_stream_outbound import TextStreamOutboundDTO
+from application.ports.inbound.stt_inbound_port import SttInboundPort
+from application.ports.service.stt_service_port import SttServicePort
+from infrastructure.inbound.http.routes.available import handle_available
+from infrastructure.inbound.http.routes.get_stream import handle_get_stream
+from infrastructure.inbound.http.routes.health import handle_health
+from infrastructure.inbound.http.routes.process_batch import DEFAULT_SAMPLE_RATE, handle_process_batch
+from infrastructure.inbound.http.routes.process_stream import handle_process_stream
+from infrastructure.inbound.http.routes.set_stream import handle_set_stream
+from infrastructure.inbound.http.routes.stop import handle_stop
 
 GATE_PREFIX = "/gate"
 
 
-class SttHandler:
-    """The STT routes. The main handler has all of them; the wake-phrase gate has its own, under ``/gate``, with only
-    the shared stream (``set``/``get``), ``available`` and ``stop``, and its ``completed`` events carry the audio.
+class SttHandler(SttInboundPort):
+    """The HTTP inbound adapter. It declares which endpoints exist and wires each to its function in ``routes/``;
+    the request decoding, the answers and the error mapping live in ``helpers/``, ``response/`` and ``errors/``.
+    Its operations are those of ``SttInboundPort`` (DTOs, no HTTP types) and the routes call them.
+
+    The main handler has all the routes; the wake-phrase gate has its own, under ``/gate``, with only the shared
+    stream (``set``/``get``), ``available`` and ``stop``, and its ``completed`` events carry the audio.
 
     The audio comes in as utterances, already cut by the microphone: STT does no silence detection."""
 
     def __init__(
         self,
-        port: SttTranscriptionPort,
+        service: SttServicePort,
         *,
         prefix: str = "",
         include_audio: bool = False,
-        gate: SttTranscriptionPort | None = None,
+        gate: SttServicePort | None = None,
     ) -> None:
-        self._port = port
+        self._service = service
         self._include_audio = include_audio
         self._gate = gate  # when the service also runs the gate, /available reports both
         self.router = APIRouter()
+        self._register_routes(prefix)
+
+    def _register_routes(self, prefix: str) -> None:
+        inbound: SttInboundPort = self
+        include_audio = self._include_audio
         add = self.router.add_api_route
+
+        async def health() -> JSONResponse:
+            return await handle_health(inbound)
+
+        async def available() -> JSONResponse:
+            return await handle_available(inbound)
+
+        async def stop() -> JSONResponse:
+            return await handle_stop(inbound)
+
+        async def process_stream(request: Request) -> Response:
+            return await handle_process_stream(request, inbound)
+
+        async def set_stream(request: Request) -> Response:
+            return await handle_set_stream(request, inbound)
+
+        async def get_stream(request: Request) -> Response:
+            return await handle_get_stream(request, inbound, include_audio)
+
+        async def process_batch(request: Request, sample_rate: int = DEFAULT_SAMPLE_RATE) -> JSONResponse:
+            return await handle_process_batch(request, sample_rate, inbound)
+
         if not prefix:
-            add("/health", self.handle_health, methods=["GET"], tags=["Health"])
-        add(f"{prefix}/available", self.handle_available, methods=["GET"])
-        add(f"{prefix}/stop", self.handle_stop, methods=["POST"])
+            add("/health", health, methods=["GET"], tags=["Health"])
+        add(f"{prefix}/available", available, methods=["GET"])
+        add(f"{prefix}/stop", stop, methods=["POST"])
         if not prefix:
-            add("/process/stream", self.handle_process_stream, methods=["POST"], response_model=None)
-        add(f"{prefix}/process/stream/set", self.handle_set_stream, methods=["POST"], response_model=None)
-        add(f"{prefix}/process/stream/get", self.handle_get_stream, methods=["GET"], response_model=None)
+            add("/process/stream", process_stream, methods=["POST"], response_model=None)
+        add(f"{prefix}/process/stream/set", set_stream, methods=["POST"], response_model=None)
+        add(f"{prefix}/process/stream/get", get_stream, methods=["GET"], response_model=None)
         if not prefix:
-            add("/process/batch", self.handle_process_batch, methods=["POST"])
+            add("/process/batch", process_batch, methods=["POST"])
 
-    async def handle_health(self) -> JSONResponse:
-        return success("health_check", "Service is healthy", HealthCheckResponse(healthy=True))
+    # --- SttInboundPort: the operations every inbound adapter offers --------------------------------
 
-    async def handle_available(self) -> JSONResponse:
-        try:
-            available = self._port.is_available() and (self._gate is None or self._gate.is_available())
-        except Exception as error:
-            return failure("check_availability", "Failed to check availability", error)
-        return success(
-            "check_availability",
-            "Availability checked successfully",
-            AvailabilityResponse(is_available=available),
-        )
+    def health(self) -> bool:
+        return True
 
-    async def handle_stop(self) -> JSONResponse:
-        try:
-            await self._port.stop_stream()
-        except Exception as error:
-            return failure("stop_stream", "Failed to stop stream", error)
-        return success("stop_stream", "Stream stopped successfully")
+    def is_available(self) -> bool:
+        return self._service.is_available() and (self._gate is None or self._gate.is_available())
 
-    async def handle_process_stream(self, request: Request) -> Response:
-        try:
-            result = await self._port.process_stream(
-                ProcessStreamInboundDTO(utterances=_utterances_of(request))
-            )
-        except Exception as error:
-            return failure("process_stream", "Failed to process stream", error)
-        return StreamingResponse(
-            text_event_stream(result.text_stream),
-            media_type=_SSE,
-            status_code=status.HTTP_200_OK,
-            headers=_stream_headers("process_stream", "success", "Stream processed successfully"),
-        )
+    async def stop(self) -> None:
+        await self._service.stop_stream()
 
-    async def handle_set_stream(self, request: Request) -> Response:
-        try:
-            dto = SetStreamInboundDTO(utterances=_utterances_of(request))
-        except Exception as error:
-            return failure("set_stream", "Failed to set stream", error)
+    async def process_stream(self, request: ProcessStreamInboundDTO) -> TextStreamOutboundDTO:
+        return await self._service.process_stream(request)
 
-        async def run_set_stream() -> None:
-            await self._port.set_stream(dto)
-            logger.info("Set stream completed")
+    async def set_stream(self, request: SetStreamInboundDTO) -> None:
+        await self._service.set_stream(request)
 
-        formatter, media_type = self._output_format(request)
-        return InputStreamResponse(
-            run_set_stream,
-            formatter=formatter,
-            media_type=media_type,
-            status_code=status.HTTP_200_OK,
-            headers=_stream_headers(
-                "set_stream", "accepted", "Input stream connection established"
-            ),
-        )
+    async def get_stream(self) -> TextStreamOutboundDTO:
+        return await self._service.get_stream()
 
-    async def handle_get_stream(self, request: Request) -> Response:
-        """Read the transcripts of the stream set with ``/process/stream/set``."""
-        try:
-            result = await self._port.get_stream()
-        except NoActiveStream as error:
-            logger.warning("Get stream rejected", error=error)
-            return failure_message("get_stream", str(error), status.HTTP_404_NOT_FOUND, str(error))
-        except Exception as error:
-            return failure("get_stream", "Failed to get stream", error)
-
-        formatter, media_type = self._output_format(request)
-        return StreamingResponse(
-            text_event_stream(
-                result.text_stream,
-                formatter=formatter,
-                emit_empty_completion_on_end=False,
-                heartbeat_interval_seconds=_GET_HEARTBEAT_SECONDS,
-                include_audio=self._include_audio,
-            ),
-            media_type=media_type,
-            status_code=status.HTTP_200_OK,
-            headers=_stream_headers("get_stream", "success", "Stream retrieved successfully"),
-        )
-
-    async def handle_process_batch(
-        self, request: Request, sample_rate: int = _DEFAULT_BATCH_SAMPLE_RATE
-    ) -> JSONResponse:
-        try:
-            audio_data = await request.body()
-            if not audio_data:
-                logger.warning("Batch request rejected: empty audio body")
-                return failure_message(
-                    "process_batch",
-                    "No audio data provided",
-                    status.HTTP_400_BAD_REQUEST,
-                    "No audio data provided",
-                )
-            result = await self._port.process_batch(
-                ProcessBatchInboundDTO(audio_data=audio_data, sample_rate=sample_rate)
-            )
-        except Exception as error:
-            return failure("process_batch", "Failed to process batch", error)
-        return success(
-            "process_batch",
-            "Audio processed successfully",
-            STTProcessBatchResponse(text=result.text),
-        )
-
-    @staticmethod
-    def _output_format(request: Request) -> tuple[Formatter, str]:
-        if _wants_ndjson(request):
-            return ndjson_format, _NDJSON
-        return sse_format, _SSE
+    async def process_batch(self, request: ProcessBatchInboundDTO) -> BatchTranscriptionOutboundDTO:
+        return await self._service.process_batch(request)

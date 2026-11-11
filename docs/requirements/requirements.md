@@ -1,8 +1,8 @@
 # Requirements
 
-Status as of 2026-11-08. **Done** means implemented and covered by the unit tests (`140 passed`, fake engines: no real model, no OpenAI call, no hardware); **Partly done** means some of it exists; **Planned** means recommended or decided and not built; **Not verified** means it exists but was not run for real recently. Every row names where it is built or decided (an ADR, a source file or a test).
+Status as of 2026-11-11. **Done** means implemented and covered by the unit tests (`152 passed` on 2026-11-11, fake engines: no real model, no OpenAI call, no hardware); **Partly done** means some of it exists; **Planned** means recommended or decided and not built; **Not verified** means it exists but was not run for real recently. Every row names where it is built or decided (an ADR, a source file or a test).
 
-Sources: the code of `stt_microservice` at commit `853d1bf` plus the uncommitted changes of the deployment plan (T-01, 2026-11-06 to 2026-11-08); the stream contract in `contracts` (`contracts/stream/README.md`, the 0.15.0 wheel); the maintainer's decisions recorded in the ADRs of `docs/decisions/`; the deployment audit of 2026-11-04 ([deployment_audit/stt.md](../deployment_audit/stt.md)).
+Sources: the code of `stt_microservice` at commit `8ee7c7d` (the deployment plan, 2026-11-06 to 2026-11-09, not pushed) plus the uncommitted restructure of 2026-11-11 (ports, DTOs, dependencies, inbound HTTP folder); the stream contract in `contracts` (`contracts/stream/README.md`, the 0.16.0 wheel); the maintainer's decisions recorded in the ADRs of `docs/decisions/`; the deployment audit of 2026-11-04 ([deployment_audit/stt.md](../deployment_audit/stt.md)).
 
 ## Functional: transcription
 
@@ -10,7 +10,7 @@ Sources: the code of `stt_microservice` at commit `853d1bf` plus the uncommitted
 |---|---|---|---|
 | FR-1 | The service transcribes **finished utterances** (PCM16 mono, each with its own sample rate), one batch per utterance. It does no silence detection and cuts no audio: the microphone does. | Done | ADR-002, `SttService._transcribed`, `test_stt_service.py` |
 | FR-2 | An utterance whose transcription is empty (no speech) produces no text event. | Done | `SttService._transcribed`, `test_stt_service.py` |
-| FR-3 | Two interchangeable engines behind one port: the OpenAI Whisper API (`whisper-1`, the default) and a local faster-whisper model on the CPU; `STT_ENGINE` selects (anything other than `openai` is local). Engine modules are imported only when selected. | Done; both engines were run for real on a Windows PC on 2026-11-06 (local: T-01.1.3, OpenAI: T-01.1.4); neither was run on a Raspberry Pi or in Docker | ADR-004, `stt_dependencies.py`, `test_transcription_engines.py` |
+| FR-3 | Two interchangeable engines behind one port: the OpenAI Whisper API (`whisper-1`, the default) and a local faster-whisper model on the CPU; `STT_ENGINE` selects (anything other than `openai` is local). Engine modules are imported only when selected. | Done; both engines were run for real on a Windows PC on 2026-11-06 (local: T-01.1.3, OpenAI: T-01.1.4); neither was run on a Raspberry Pi or in Docker | ADR-004, `transcription_dependency.py`, `gate_transcription_dependency.py`, `test_transcription_engines.py` |
 | FR-4 | `STT_LANGUAGE` is forced on every transcription (default `en`). | Done | `SttConfig`, both engines |
 | FR-5 | `STT_PROMPT` biases the OpenAI engine toward words spelled as written (the wake phrase). | Done; real effect seen once on 2026-11-06: a 3 s silent buffer gave `you` without the prompt and an empty text with it (one sample each, not a conclusion) | `openai_whisper_transcription.py`, `test_transcription_engines.py` |
 | FR-6 | The OpenAI engine fails at start-up when `OPENAI_API_KEY` is empty (`EngineNotConfigured`). | Done | `new_transcription`, `test_http_container.py` |
@@ -37,13 +37,13 @@ Sources: the code of `stt_microservice` at commit `853d1bf` plus the uncommitted
 |---|---|---|---|
 | FR-20 | With `STT_GATE_ENABLED=1` a second, local engine (`STT_GATE_MODEL`, default `base` since 2026-11-09, greedy decoding, `STT_GATE_PROMPT`, default `Oblivion 306.`, as hint) runs with its own shared stream under `/gate/process/stream/{set,get}`, `/gate/available` and `/gate/stop`. | Done; real model run on a Windows PC on 2026-11-06 (not on a Pi) | ADR-005, `new_gate_transcription`, `test_gate_http.py` |
 | FR-21 | Each `completed` event of the gate's stream carries the utterance's audio in `audio_base64` (PCM16 mono, at the input rate) so Brain can send it to the real engine when the phrase was heard; the main stream leaves it empty. | Done | `SttService(with_audio=True)`, `test_gate_http.py` |
-| FR-22 | `/available` is true only when the main engine **and** the gate are ready. | Done | `handle_available`, `test_gate_http.py` |
+| FR-22 | `/available` is true only when the main engine **and** the gate are ready. | Done | `routes/available.py`, `SttHandler.is_available`, `test_gate_http.py` |
 
 ## Non-functional
 
 | ID | Requirement | Status | Where |
 |---|---|---|---|
-| NFR-1 | Same layered layout as the other services; source dependencies point inward only (`composition_root -> infrastructure -> application -> domain`), checked by a test that parses the imports. `main_flow` imports neither adapter. | Done | ADR-001, `tests/architecture/test_dependency_rules.py` |
+| NFR-1 | Same layered layout as the other services; source dependencies point inward only (`composition_root -> infrastructure -> application -> domain`), checked by a test that parses the imports. `main_flow` imports neither adapter. The service, the inbound adapter and the engines each implement a port of their own (`SttServicePort`, `SttInboundPort`, `SttOutboundPort`) and the DTOs sit in `application/dtos/inbound` or `outbound`, also checked by tests. | Done | ADR-001, `tests/architecture/test_dependency_rules.py`, `test_ports.py`, `test_dtos.py` |
 | NFR-2 | The service never calls another microservice; Brain is the only coordinator. | Done | ADR-006 |
 | NFR-3 | Configuration only through environment variables with a documented `.env.example`; no port or URL is hardcoded; the default bind is `127.0.0.1`. | Done | `ServerConfig`, `SttConfig` |
 | NFR-4 | The logs hold lengths, never the text or the audio of an utterance; the API key is never logged. | Done. By review of the code and two real runs (2026-11-06) the logs hold lengths and the model name, never the text or the audio, and no key. Since T-01.7 an OpenAI error reaches the batch answer, the stream `error` event and the log only as the fixed message `OpenAI request failed: <ErrorType> (HTTP <status>)`; before it, a wrong key came back as the library's text with its first 8 and last 4 characters (found in T-01.5 drill 5, T-01.1.5). Tests: `test_a_wrong_openai_key_*` and `test_openai_engine_*` (fake key). The local engine's errors are still the library's text (no secret found there). No test checks the log content of the other paths. | [monitoring.md](../operations/monitoring.md) |

@@ -1,6 +1,6 @@
 # ADR-005: The wake-phrase gate is a second service instance with a local engine, under `/gate`
 
-- **Status:** Accepted and built (commit `e366de1`); not run with a real model in the last pass.
+- **Status:** Accepted and built (commit `e366de1`). Run for real with a real model on 2026-11-06 and through Brain with a real microphone on 2026-11-09 (see the updates below); not run on a Raspberry Pi.
 - **Date:** 2026-10-05.
 
 ## Context

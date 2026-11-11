@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 
-class TranscriptionPort(ABC):
+class SttOutboundPort(ABC):
     """What the application needs from a speech-to-text engine: the text of one finished utterance."""
 
     @abstractmethod

@@ -7,11 +7,11 @@ import httpx
 from fastapi import FastAPI
 from shared_logging.testing import capture
 
-from application.dtos.batch_transcription_outbound import BatchTranscriptionOutboundDTO
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.outbound.batch_transcription_outbound import BatchTranscriptionOutboundDTO
 from application.errors import NoActiveStream
 from application.services.stt_service import SttService
-from composition_root.dependencies import stt_dependencies as deps
+from composition_root.dependencies.http_app_dependency import new_http_app
 from domain.errors import InvalidAudioUtterance
 from infrastructure.inbound.http.http_handler import SttHandler
 from infrastructure.outbound.openai_whisper.openai_whisper_transcription import (
@@ -122,7 +122,7 @@ def _openai_app(monkeypatch) -> FastAPI:
     """The real app and the real OpenAI engine; only the client is one the API refuses."""
     _failing_openai(monkeypatch, _wrong_key_error())
     service = SttService(OpenAIWhisperTranscription(FAKE_KEY), "stt")
-    return deps.new_http_app(service, "stt", None)
+    return new_http_app(service, "stt", None)
 
 
 def _ask(app: FastAPI, *requests: tuple[str, str, dict]) -> list[httpx.Response]:

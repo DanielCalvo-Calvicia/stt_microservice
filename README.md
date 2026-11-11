@@ -13,7 +13,7 @@ engine = OpenAI Whisper API (default)  or  local faster-whisper  (+ optional gat
 
 ## Status
 
-Working, needs a retest after the recent changes. The code and the unit tests agree (140 passed). The OpenAI engine, the local engine and the gate were run for real on a Windows PC on 2026-11-06 (see the table); Docker on amd64 was run on 2026-11-09 (T-03); a Raspberry Pi has not been run (postponed by the maintainer until everything works on Windows).
+Working, needs a retest after the recent changes. The code and the unit tests agree (152 passed). The OpenAI engine, the local engine and the gate were run for real on a Windows PC on 2026-11-06 (see the table); Docker on amd64 was run on 2026-11-09 (T-03); a Raspberry Pi has not been run (postponed by the maintainer until everything works on Windows).
 
 | Area | State |
 |---|---|
@@ -22,7 +22,7 @@ Working, needs a retest after the recent changes. The code and the unit tests ag
 | OpenAI engine (`whisper-1`, optional `STT_PROMPT`) | Built; the real API was called on 2026-11-06 (T-01.1.4): spoken English transcribed exactly, about 0.7 to 1.5 s per utterance from a Windows PC; a wrong key gives the fixed message `OpenAI request failed: AuthenticationError (HTTP 401)` (T-01.7, 2026-11-06) |
 | Local engine (faster-whisper on the CPU) | Built; run for real on 2026-11-06 on a Windows PC (`small.en` downloaded, loaded and transcribed spoken English; about 4.5 to 5 s per utterance there; **not** run on a Raspberry Pi or in Docker). Model, threads and compute type are settings (`STT_MODEL`, `STT_THREADS`, `STT_COMPUTE_TYPE`, built in T-01.2.3 and unit-tested with a fake model; a non-default value was **not** run with a real model) |
 | Wake-phrase gate under `/gate/...` (`STT_GATE_ENABLED=1`) | Built, covered by tests with fake engines; the real `tiny.en` gate returned the spoken wake phrase with the utterance audio in under 1 s on 2026-11-06 (Windows PC). Through Brain with a real microphone on 2026-11-09 the path worked (no phrase: no batch request; phrase: exactly one), but the gate (then `tiny.en` with the prompt `Oblivion`) heard the name only 1 time in 4. Tuned the same day offline on 16 real clips: since then the defaults are `STT_GATE_MODEL=base` and `STT_GATE_PROMPT=Oblivion 306.` (8 of 10 phrases caught offline, 0 of 6 ordinary sentences, 0.6 s per clip on a PC). **Re-run live the same day: only 2 of 8 phrases were accepted** (3 ordinary sentences ignored correctly); the cause was found the same day: the microphone service started each utterance 0.01 to 0.12 s after the voiced onset and clipped the first sounds of the name. After a pre-roll was added to the microphone (`MICROPHONE_PREROLL_SECONDS`, 0.2 s) a third live run accepted **4 of 4** phrases that reached the gate (6 other utterances were dropped by Brain's echo guard while the robot was speaking; small sample, ADR-005). Not run on a Pi |
-| `contracts` events, envelope, error mapping | Built (contracts 0.15.0 wheel in `vendor/`, the committed version; the working tree has the maintainer's uncommitted 0.16.0) |
+| `contracts` events, envelope, error mapping | Built (contracts 0.16.0 wheel in `vendor/`, committed in `8ee7c7d`, not pushed) |
 | Silence detection | **Not here by design**: it lives in `microphone_microservice` |
 | Authentication, CORS, request size limit | **Not built** (see [docs/security/security.md](docs/security/security.md)) |
 | Docker image | None in this repo: `deployment/` builds it. Built and run on amd64 on 2026-11-09 (865 MB, Python 3.12): the models live on the volume `oblivion-stt-models` ([ADR-009](docs/decisions/ADR-009-model-delivery-in-docker.md)) and a recreated container does not download again; runs as root; arm64 not run (see [docs/deployment/deployment.md](docs/deployment/deployment.md)) |
@@ -95,9 +95,9 @@ Detail, event shapes and errors: [docs/api/api.md](docs/api/api.md).
 ```text
 main.py            entry point (calls main_flow)
 main_flow/         .env, config, logging init, uvicorn, graceful shutdown
-composition_root/  the only place concrete adapters are wired together (engine choice, gate)
-infrastructure/    config; HTTP inbound (handler, envelope, error mapper, SSE/NDJSON encoding, NDJSON utterance decoder); Whisper engines (outbound)
-application/       use-case service, ports, DTOs, application errors
+composition_root/  the only place concrete adapters are wired together: one file per object in dependencies/ (the engine, the gate's engine, the service, the HTTP app) and the container
+infrastructure/    config; HTTP inbound: http_handler.py (wires the endpoints) with routes/ (one file per endpoint), response/ (envelope, SSE/NDJSON framing), errors/ (error to status) and helpers/ (request decoding); Whisper engines (outbound)
+application/       use-case service, three ports (service, inbound, outbound), DTOs in inbound/ and outbound/, application errors
 domain/            the utterance value objects and domain errors
 scripts/           fetch_gate_model.py (downloads the local models the settings need: the main model when the engine is local, the gate's when the gate is on; run by the deploy tool's `prepare` step; the name is kept because the deploy catalogue names it)
 tests/             pytest by layer, plus architecture/ (the dependency rules), scripts/ (the deploy `prepare` script) and simple.py (end to end, needs a running service)
@@ -116,7 +116,7 @@ Dependencies point inward only (`infrastructure -> application -> domain`); `tes
 & windows\Scripts\python.exe tests\simple.py  # end to end against a running service (needs real audio)
 ```
 
-Result on 2026-11-08: `140 passed` in about 3 s (90 on 2026-11-05; T-01.7 added 5 tests, T-01.2.2 added 11, T-01.2.3 added 6, and T-01.3.1 and T-01.3.2 added 28 for the deploy `prepare` script). On 2026-11-06 the same 90 passed in a clean clone of the pushed branch (T-01.1.1, 6.7 s), and the workspace pipeline check (`brain_microservice\windows\Scripts\python.exe -m pytest contracts\tests -q` from the workspace root, stt as a fake engine behind the real handler) gave `84 passed, 18 skipped` in 82 s (T-01.1.6; the skips are the real-LLM tests and requirement files a service does not have). `ruff`, `mypy` and `black` are configured in `pyproject.toml` but are **not installed in this venv**; the microphone venv's ruff reported 9 findings (4 auto-fixable) here on 2026-10-01, not fixed on purpose; mypy was not run. The real engines (OpenAI call, faster-whisper model) and `tests/simple.py` were not run in this pass.
+Result on 2026-11-11: `152 passed` in about 3 s (140 on 2026-11-08; 9 new ones check that the service, the HTTP handler and both engines implement their ports and 3 that every DTO sits in `application/dtos/inbound` or `outbound`). The workspace pipeline check on the same day gave `63 passed, 18 skipped, 21 failed`: the failures are the brain to ai-agent flow tests and ai-agent's bundled-wheel check, none involve stt (its pipeline tests pass). Result on 2026-11-08: `140 passed` in about 3 s (90 on 2026-11-05; T-01.7 added 5 tests, T-01.2.2 added 11, T-01.2.3 added 6, and T-01.3.1 and T-01.3.2 added 28 for the deploy `prepare` script). On 2026-11-06 the same 90 passed in a clean clone of the pushed branch (T-01.1.1, 6.7 s), and the workspace pipeline check (`brain_microservice\windows\Scripts\python.exe -m pytest contracts\tests -q` from the workspace root, stt as a fake engine behind the real handler) gave `84 passed, 18 skipped` in 82 s (T-01.1.6; the skips are the real-LLM tests and requirement files a service does not have). `ruff`, `mypy` and `black` are configured in `pyproject.toml` but are **not installed in this venv**; the microphone venv's ruff reported 9 findings (4 auto-fixable) here on 2026-10-01, not fixed on purpose; mypy was not run. The real engines (OpenAI call, faster-whisper model) and `tests/simple.py` were not run in this pass.
 
 ## Scope
 

@@ -1,6 +1,6 @@
 """Outbound adapter: transcription through the OpenAI Whisper API.
 
-Implements ``TranscriptionPort``. Each finished utterance (the microphone cuts them) is sent to
+Implements ``SttOutboundPort``. Each finished utterance (the microphone cuts them) is sent to
 the API as a WAV file.
 """
 
@@ -14,7 +14,7 @@ from openai import OpenAI, OpenAIError
 from shared_logging import get_logger
 
 from application.errors import TranscriptionFailed
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
 
 logger = get_logger(__name__)
 
@@ -79,7 +79,7 @@ def _transcription_failed(error: OpenAIError) -> TranscriptionFailed:
     return TranscriptionFailed(f"OpenAI request failed: {error_type}")
 
 
-class OpenAIWhisperTranscription(TranscriptionPort):
+class OpenAIWhisperTranscription(SttOutboundPort):
     def __init__(self, api_key: str, language: str = "en", prompt: str = "") -> None:
         self._api_key = api_key
         self._language = language or "en"

@@ -5,7 +5,7 @@ from fastapi import status
 from fastapi.responses import JSONResponse
 from shared_logging import get_logger
 
-from infrastructure.inbound.http.http_error_mapper import map_error
+from infrastructure.inbound.http.errors.http_error_mapper import map_error
 
 logger = get_logger(__name__)
 

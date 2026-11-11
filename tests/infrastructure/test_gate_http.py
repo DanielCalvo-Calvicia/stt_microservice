@@ -8,16 +8,16 @@ import httpx
 from contracts.stream import schemas
 from contracts.stream.codec import decode_event
 
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
 from application.services.stt_service import SttService
-from composition_root.dependencies import stt_dependencies as deps
+from composition_root.dependencies.http_app_dependency import new_http_app
 from tests.infrastructure.test_http_handler import NDJSON, upload_body
 
 FIRST = b"oblivion 306"  # whole 16-bit samples: an even number of bytes
 SECOND = b"hello!"
 
 
-class Engine(TranscriptionPort):
+class Engine(SttOutboundPort):
     def __init__(self, label: str, available: bool = True) -> None:
         self.label = label
         self.available = available
@@ -32,7 +32,7 @@ class Engine(TranscriptionPort):
 def _app(gate_available: bool = True, with_gate: bool = True):
     main = SttService(Engine("main"), "stt")
     gate = SttService(Engine("gate", gate_available), "gate", with_audio=True) if with_gate else None
-    return deps.new_http_app(main, "stt", gate)
+    return new_http_app(main, "stt", gate)
 
 
 async def _set_then_get(app, prefix: str, *audio: bytes) -> list[dict]:

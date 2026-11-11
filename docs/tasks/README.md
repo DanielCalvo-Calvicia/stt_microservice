@@ -12,6 +12,8 @@ The status of every task is on the board in section 5. The order in which to do 
 
 **Plan revision 4 (2026-11-06):** new task [T-01.7](T-01_deployment-readiness/T-01.7_hide-openai-error-text.md) (the OpenAI engine raises a fixed message so a wrong key is not echoed in part), found by the failure drills of T-01.1.5 and added at the maintainer's yes. No other change.
 
+> **Note 2026-11-11:** the task files are records of the time they were written. The code paths they name have moved since: `composition_root/dependencies/stt_dependencies.py` is now four files (`transcription_dependency.py`, `gate_transcription_dependency.py`, `stt_service_dependency.py`, `http_app_dependency.py`); `TranscriptionPort` (`application/ports/outbound/transcription_port.py`) is `SttOutboundPort` (`stt_outbound_port.py`); `SttTranscriptionPort` is `SttServicePort` (`application/ports/service/`); the DTOs are in `application/dtos/inbound/` and `outbound/`; the files of `infrastructure/inbound/http/` are in its `routes/`, `response/`, `errors/` and `helpers/` subfolders. The current layout is in [../architecture/architecture.md](../architecture/architecture.md) section 3.
+
 ## 1. Structure and naming
 
 - Every task is a Markdown file. A task with subtasks lives in a folder of the same name, and its own file has the same name inside that folder. Leaves are single files.

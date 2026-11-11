@@ -49,8 +49,8 @@ These are **not** configurable. The model, the compute type and the threads of a
 | Device of a local model (main and gate) | `cpu` | `LocalWhisperTranscription.__init__` |
 | Local decoding | `beam_size` 5 (gate: 1), `condition_on_previous_text=False`, `no_speech_threshold=0.65` | `local_whisper_transcription.py` |
 | OpenAI model and temperature | `whisper-1`, `temperature=0.0`, `response_format="text"` | `openai_whisper_transcription.py` |
-| Heartbeat of `GET .../get` | 15 s | `_GET_HEARTBEAT_SECONDS` in `http_handler.py` |
-| Default batch sample rate | 16000 | `_DEFAULT_BATCH_SAMPLE_RATE` in `http_handler.py` |
+| Heartbeat of `GET .../get` | 15 s | `HEARTBEAT_SECONDS` in `routes/get_stream.py` |
+| Default batch sample rate | 16000 | `DEFAULT_SAMPLE_RATE` in `routes/process_batch.py` |
 | Gate route prefix | `/gate` (Brain's `STT_GATE_PATH_PREFIX` must match) | `GATE_PREFIX` in `http_handler.py` |
 | Keep-alive of the server | 60 s | `main_flow/http.py` |
 

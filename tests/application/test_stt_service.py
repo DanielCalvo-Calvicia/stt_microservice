@@ -3,17 +3,17 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from application.dtos.process_batch_inbound import ProcessBatchInboundDTO
-from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
-from application.dtos.set_stream_inbound import SetStreamInboundDTO
+from application.dtos.inbound.process_batch_inbound import ProcessBatchInboundDTO
+from application.dtos.inbound.process_stream_inbound import ProcessStreamInboundDTO
+from application.dtos.inbound.set_stream_inbound import SetStreamInboundDTO
 from application.errors import NoActiveStream, SharedStreamForwardingError
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
 from application.services.stt_service import SttService
 from domain.value_objects.audio_utterance import AudioUtterance
 from domain.value_objects.utterance import Utterance
 
 
-class FakeTranscription(TranscriptionPort):
+class FakeTranscription(SttOutboundPort):
     """Hears ``heard <bytes>`` in every utterance (with blanks around, like a real engine)."""
 
     def __init__(self, fail_with: Exception | None = None, available: bool = True) -> None:

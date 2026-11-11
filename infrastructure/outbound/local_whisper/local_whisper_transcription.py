@@ -1,6 +1,6 @@
 """Outbound adapter: local transcription with faster-whisper on the CPU.
 
-Implements ``TranscriptionPort``. Each finished utterance (the microphone cuts them) is
+Implements ``SttOutboundPort``. Each finished utterance (the microphone cuts them) is
 transcribed in a worker thread.
 """
 
@@ -11,7 +11,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 from shared_logging import get_logger
 
-from application.ports.outbound.transcription_port import TranscriptionPort
+from application.ports.outbound.stt_outbound_port import SttOutboundPort
 
 logger = get_logger(__name__)
 
@@ -39,7 +39,7 @@ def _pcm_to_whisper_input(audio_data: bytes, sample_rate: int) -> "np.ndarray[An
     return samples
 
 
-class LocalWhisperTranscription(TranscriptionPort):
+class LocalWhisperTranscription(SttOutboundPort):
     def __init__(
         self,
         language: str = "en",
