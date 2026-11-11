@@ -1,0 +1,111 @@
+"""Background task that keeps transcribing an external voice stream."""
+
+import asyncio
+from collections.abc import AsyncIterator
+
+import httpx
+from shared_logging import async_event_hooks, get_logger, span
+
+from application.dtos.process_stream_inbound import ProcessStreamInboundDTO
+from application.ports.inbound.stt_transcription_port import SttTranscriptionPort
+
+logger = get_logger(__name__)
+
+_RECONNECT_SECONDS = 5
+
+
+class VoiceStreamAutoloader:
+    def __init__(self, stream_url: str, port: SttTranscriptionPort) -> None:
+        self.stream_url = stream_url
+        self._port = port
+        self._task: asyncio.Task[None] | None = None
+        logger.info(
+            "VoiceStreamAutoloader initialized",
+            stream_url=stream_url,
+        )
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            logger.info("Creating VoiceStreamAutoloader worker task")
+            self._task = asyncio.create_task(self._worker())
+        else:
+            logger.info("VoiceStreamAutoloader worker task is already running")
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            logger.info("Cancelling VoiceStreamAutoloader worker task")
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                logger.info("VoiceStreamAutoloader worker task cancelled")
+            self._task = None
+        else:
+            logger.info("VoiceStreamAutoloader stop requested with no active task")
+
+    async def _worker(self) -> None:
+        method = "POST"
+        while True:
+            with span("autoload voice stream", kind="client"):
+                try:
+                    logger.info(
+                        "Connecting to voice stream",
+                        stream_url=self.stream_url,
+                        method=method,
+                    )
+                    # timeout=None allows an infinitely long stream
+                    async with httpx.AsyncClient(
+                        timeout=None, event_hooks=async_event_hooks()
+                    ) as client:
+                        stream_context = (
+                            client.stream(method, self.stream_url, json={})
+                            if method == "POST"
+                            else client.stream(method, self.stream_url)
+                        )
+                        async with stream_context as response:
+                            if response.status_code == 405 and method == "POST":
+                                logger.warning(
+                                    "Voice stream rejected POST with 405; falling back to GET",
+                                )
+                                method = "GET"
+                                continue
+
+                            response.raise_for_status()
+                            logger.info(
+                                "Connected to voice stream",
+                                stream_url=self.stream_url,
+                                status=response.status_code,
+                            )
+
+                            async def stream_generator(
+                                response: httpx.Response = response,
+                            ) -> AsyncIterator[bytes]:
+                                async for chunk in response.aiter_bytes():
+                                    logger.debug(
+                                        "Autoloader received stream chunk", bytes=len(chunk)
+                                    )
+                                    yield chunk
+
+                            result = await self._port.process_stream(
+                                ProcessStreamInboundDTO(audio_stream=stream_generator())
+                            )
+                            async for text in result.text_stream:
+                                if text:
+                                    logger.info("Autoload transcription", text=text)
+
+                except httpx.RequestError as error:
+                    logger.warning(
+                        "Voice stream connection error; reconnecting",
+                        error=error,
+                        reconnect_seconds=_RECONNECT_SECONDS,
+                    )
+                    await asyncio.sleep(_RECONNECT_SECONDS)
+                except asyncio.CancelledError:
+                    logger.info("VoiceStreamAutoloader worker loop cancelled")
+                    break
+                except Exception:
+                    logger.exception(
+                        "Unexpected VoiceStreamAutoloader error; reconnecting",
+                        reconnect_seconds=_RECONNECT_SECONDS,
+                    )
+                    await asyncio.sleep(_RECONNECT_SECONDS)
